@@ -11,26 +11,17 @@
 <body>
   <!-- Custom Titlebar -->
   <div id="titlebar">
-    <div class="titlebar-drag">
-      <button id="btn-toggle-sidebar" class="titlebar-btn titlebar-btn-sidebar" title="Toggle Sidebar (Ctrl+B)">
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-          <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-        </svg>
-      </button>
-      <svg class="titlebar-logo" width="18" height="18" viewBox="0 0 24 24" fill="none">
+    <div class="titlebar-center">
+      <svg class="titlebar-logo" width="16" height="16" viewBox="0 0 24 24" fill="none">
         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#00d26a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
       <span class="titlebar-title">Claude Code</span>
     </div>
-    <div class="titlebar-controls">
-      <button id="btn-minimize" class="titlebar-btn" title="Minimize">
-        <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" rx="0.75" fill="currentColor"/></svg>
-      </button>
-      <button id="btn-maximize" class="titlebar-btn" title="Maximize">
-        <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
-      </button>
-      <button id="btn-close" class="titlebar-btn titlebar-btn-close" title="Close">
-        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    <div class="titlebar-right">
+      <button id="btn-toggle-sidebar" class="titlebar-btn titlebar-btn-sidebar" title="Toggle Sidebar (Ctrl+B)">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
       </button>
     </div>
   </div>
@@ -39,39 +30,15 @@
   <div id="app">
     <!-- Sidebar -->
     <aside id="sidebar">
-      <div class="sidebar-tabs">
-        <button class="sidebar-tab active" data-tab="chats">Chats</button>
-        <button class="sidebar-tab" data-tab="memories">Memories</button>
+      <div class="sidebar-header">
+        <button id="new-chat-btn" title="New Chat (Ctrl+N)">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          <span>New Chat</span>
+        </button>
       </div>
-
-      <!-- Chats Tab -->
-      <div id="tab-chats" class="tab-content active">
-        <div class="sidebar-header">
-          <button id="new-chat-btn" title="New Chat (Ctrl+N)">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            </svg>
-            <span>New Chat</span>
-          </button>
-        </div>
-        <div id="conversation-list"></div>
-      </div>
-
-      <!-- Memories Tab -->
-      <div id="tab-memories" class="tab-content">
-        <div class="sidebar-header">
-          <div class="memory-search-wrapper">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
-            </svg>
-            <input id="memory-search" type="text" placeholder="Search memories..." />
-          </div>
-        </div>
-        <div id="memory-list"></div>
-        <div id="memory-empty" class="memory-empty hidden">
-          <p>No memories found</p>
-        </div>
-      </div>
+      <div id="conversation-list"></div>
 
       <div class="sidebar-footer">
         <button id="toggle-sidebar-btn" title="Toggle Sidebar">
@@ -110,6 +77,24 @@
 
       <!-- Input Area -->
       <div id="input-area">
+        <div id="project-bar">
+          <button id="project-pill" type="button" title="Select project folder">
+            <svg class="project-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span id="project-label">No project</span>
+            <svg class="project-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </button>
+          <div id="extra-dirs-list"></div>
+          <button id="add-dir-btn" type="button" title="Add another folder for context">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            <span>Add context</span>
+          </button>
+        </div>
         <div id="input-wrapper">
           <textarea id="prompt-input" placeholder="Ask Claude anything..." rows="1" autofocus></textarea>
           <div class="input-actions">
@@ -127,7 +112,32 @@
         </div>
         <div id="input-footer">
           <span id="status-text"></span>
-          <span id="cost-display"></span>
+          <div class="footer-right">
+            <span id="cost-display"></span>
+            <button id="btn-save-memory" type="button" title="Ask Claude to save the conversation to memory">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                <polyline points="17 21 17 13 7 13 7 21"/>
+                <polyline points="7 3 7 8 15 8"/>
+              </svg>
+              <span>Save memory</span>
+            </button>
+            <button id="btn-yolo" type="button" title="YOLO mode — skip all permission prompts">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+              </svg>
+              <span class="yolo-label">YOLO</span>
+            </button>
+            <div class="model-wrapper">
+              <button id="model-selector" type="button" title="Select model">
+                <span id="model-label">Default</span>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </button>
+              <div id="model-menu" class="hidden"></div>
+            </div>
+          </div>
         </div>
       </div>
     </main>

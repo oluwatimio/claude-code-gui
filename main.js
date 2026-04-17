@@ -1,9 +1,11 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { DatabaseSync } = require('node:sqlite');
+const crypto = require('node:crypto');
 
 let mainWindow;
 let currentProcess = null;
@@ -11,6 +13,7 @@ let permissionServer = null;
 let permissionPort = null;
 let pendingPermission = null;
 let mcpConfigPath = null;
+let contextDb = null;
 
 const isPacked = app.isPackaged;
 
@@ -42,12 +45,12 @@ function findClaudeBinary() {
   return 'claude'; // hope for the best
 }
 
-// MCP server lives in extraResources when packaged, next to main.js in dev
-function getMcpServerPath() {
+// MCP servers live in extraResources when packaged, next to main.js in dev
+function getMcpServerPath(name) {
   if (isPacked) {
-    return path.join(process.resourcesPath, 'mcp-permission-server.js');
+    return path.join(process.resourcesPath, name);
   }
-  return path.join(__dirname, 'mcp-permission-server.js');
+  return path.join(__dirname, name);
 }
 
 // Find node binary - Claude spawns MCP servers, so it needs the full path
@@ -85,35 +88,68 @@ function findNodeBinary() {
   return 'node';
 }
 
-// ===== Permission Bridge HTTP Server =====
+// ===== Bridge HTTP Server (permissions + context memory) =====
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => body += chunk);
+    req.on('end', () => {
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function writeJson(res, status, payload) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
+
+async function handleContextRequest(url, data) {
+  if (url === '/context/remember') return contextRemember(data);
+  if (url === '/context/recall')   return contextRecall(data);
+  if (url === '/context/forget')   return contextForget(data);
+  return null;
+}
+
 function startPermissionServer() {
   return new Promise((resolve) => {
-    permissionServer = http.createServer((req, res) => {
-      if (req.method === 'POST' && req.url === '/permission') {
-        let body = '';
-        req.on('data', (chunk) => body += chunk);
-        req.on('end', () => {
-          try {
-            const data = JSON.parse(body);
-            // Send to renderer for user approval
-            pendingPermission = res;
-            mainWindow.webContents.send('permission:request', {
-              toolName: data.tool_name || 'Unknown',
-              input: data.input || {},
-              toolUseId: data.tool_use_id || ''
-            });
-          } catch (e) {
-            res.writeHead(400);
-            res.end(JSON.stringify({ behavior: 'deny', reason: 'Bad request' }));
-          }
-        });
-      } else {
-        res.writeHead(404);
-        res.end();
+    permissionServer = http.createServer(async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(404); res.end(); return;
       }
+
+      if (req.url === '/permission') {
+        try {
+          const data = await readJson(req);
+          pendingPermission = res;
+          mainWindow.webContents.send('permission:request', {
+            toolName: data.tool_name || 'Unknown',
+            input: data.input || {},
+            toolUseId: data.tool_use_id || ''
+          });
+        } catch (e) {
+          writeJson(res, 400, { behavior: 'deny', reason: 'Bad request' });
+        }
+        return;
+      }
+
+      if (req.url.startsWith('/context/')) {
+        try {
+          const data = await readJson(req);
+          const result = await handleContextRequest(req.url, data);
+          if (result === null) { writeJson(res, 404, { error: 'Unknown endpoint' }); return; }
+          writeJson(res, 200, result);
+        } catch (e) {
+          writeJson(res, 500, { error: e.message });
+        }
+        return;
+      }
+
+      res.writeHead(404); res.end();
     });
 
-    // Listen on random available port
     permissionServer.listen(0, '127.0.0.1', () => {
       permissionPort = permissionServer.address().port;
       resolve(permissionPort);
@@ -139,7 +175,8 @@ function createWindow() {
     minHeight: 400,
     frame: false,
     backgroundColor: '#000000',
-    titleBarStyle: 'hidden',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 11, y: 11 },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -151,73 +188,153 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  mainWindow.on('maximize', () => {
-    mainWindow.webContents.send('window:maximized', true);
-  });
-  mainWindow.on('unmaximize', () => {
-    mainWindow.webContents.send('window:maximized', false);
-  });
 }
 
 app.whenReady().then(async () => {
+  openContextDb();
   await startPermissionServer();
   writeMcpConfig();
   createWindow();
 });
 
-function loadBrainConfig() {
-  // Try GUI-specific config first, then fall back to Claude CLI settings
-  const guiConfig = path.join(os.homedir(), '.config', 'claude-code-gui', 'brain.json');
-  try {
-    return JSON.parse(fs.readFileSync(guiConfig, 'utf8'));
-  } catch (e) {}
+// ===== Context memory (SQLite) =====
+function openContextDb() {
+  const userData = app.getPath('userData');
+  fs.mkdirSync(userData, { recursive: true });
+  const dbPath = path.join(userData, 'context.db');
+  contextDb = new DatabaseSync(dbPath);
+  contextDb.exec(`
+    CREATE TABLE IF NOT EXISTS memories (
+      id         TEXT PRIMARY KEY,
+      content    TEXT NOT NULL,
+      category   TEXT,
+      tags       TEXT,
+      created_at INTEGER NOT NULL,
+      session_id TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 
-  // Fall back to Claude CLI settings
-  const cliSettings = path.join(os.homedir(), '.claude', 'settings.json');
-  try {
-    const settings = JSON.parse(fs.readFileSync(cliSettings, 'utf8'));
-    const brain = settings.mcpServers?.brain;
-    if (brain) {
-      return {
-        brainUrl: brain.env?.BRAIN_URL,
-        brainApiKey: brain.env?.BRAIN_API_KEY || '',
-        mcpDistPath: brain.args?.[0]
-      };
+    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+      id UNINDEXED, content, category, tags,
+      tokenize = 'unicode61'
+    );
+    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+      INSERT INTO memories_fts(id, content, category, tags)
+        VALUES (new.id, new.content, new.category, new.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+      DELETE FROM memories_fts WHERE id = old.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+      DELETE FROM memories_fts WHERE id = old.id;
+      INSERT INTO memories_fts(id, content, category, tags)
+        VALUES (new.id, new.content, new.category, new.tags);
+    END;
+  `);
+
+  // Backfill FTS index for memories saved before the index existed.
+  const ftsCount = contextDb.prepare('SELECT COUNT(*) AS c FROM memories_fts').get().c;
+  const memCount = contextDb.prepare('SELECT COUNT(*) AS c FROM memories').get().c;
+  if (ftsCount !== memCount) {
+    contextDb.exec('DELETE FROM memories_fts');
+    const insert = contextDb.prepare('INSERT INTO memories_fts(id, content, category, tags) VALUES (?, ?, ?, ?)');
+    for (const row of contextDb.prepare('SELECT id, content, category, tags FROM memories').all()) {
+      insert.run(row.id, row.content, row.category, row.tags);
     }
-  } catch (e) {}
+  }
+}
 
-  return null;
+function rowToMemory(row) {
+  return {
+    id: row.id,
+    content: row.content,
+    category: row.category || null,
+    tags: row.tags ? row.tags.split(',').filter(Boolean) : [],
+    createdAt: row.created_at,
+    sessionId: row.session_id || null,
+  };
+}
+
+function contextRemember(data) {
+  const content = (data.content || '').trim();
+  if (!content) throw new Error('content is required');
+  const id = crypto.randomUUID();
+  const tags = Array.isArray(data.tags) ? data.tags.join(',') : '';
+  const category = data.category || null;
+  const sessionId = data.sessionId || null;
+  const createdAt = Date.now();
+  contextDb.prepare(
+    'INSERT INTO memories (id, content, category, tags, created_at, session_id) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, content, category, tags, createdAt, sessionId);
+  return { id, content, category, tags: tags ? tags.split(',') : [], createdAt };
+}
+
+function contextRecall(data) {
+  const query = (data.query || '').trim();
+  const limit = Math.min(Math.max(Number(data.limit) || 20, 1), 200);
+  if (!query) {
+    const rows = contextDb.prepare(
+      'SELECT * FROM memories ORDER BY created_at DESC LIMIT ?'
+    ).all(limit);
+    return { memories: rows.map(rowToMemory) };
+  }
+
+  const tokens = Array.from(query.matchAll(/[\p{L}\p{N}]+/gu), m => m[0]).filter(t => t.length > 0);
+  let rankedRows = [];
+  if (tokens.length) {
+    const matchExpr = tokens.map(t => `"${t.replace(/"/g, '""')}"*`).join(' OR ');
+    try {
+      rankedRows = contextDb.prepare(
+        `SELECT m.* FROM memories_fts f
+         JOIN memories m ON m.id = f.id
+         WHERE memories_fts MATCH ?
+         ORDER BY bm25(memories_fts)
+         LIMIT ?`
+      ).all(matchExpr, limit);
+    } catch (e) {
+      rankedRows = [];
+    }
+  }
+
+  if (rankedRows.length === 0) {
+    const like = `%${query}%`;
+    rankedRows = contextDb.prepare(
+      `SELECT * FROM memories
+       WHERE content LIKE ? OR category LIKE ? OR tags LIKE ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+    ).all(like, like, like, limit);
+  }
+
+  return { memories: rankedRows.map(rowToMemory) };
+}
+
+function contextForget(data) {
+  const id = data.id;
+  if (!id) throw new Error('id is required');
+  const info = contextDb.prepare('DELETE FROM memories WHERE id = ?').run(id);
+  return { deleted: info.changes > 0 };
 }
 
 function writeMcpConfig() {
-  const mcpServerPath = getMcpServerPath();
   const nodeBin = findNodeBinary();
+  const portEnv = { CLAUDE_GUI_PERMISSION_PORT: String(permissionPort) };
   const config = {
     mcpServers: {
       'gui_permissions': {
         type: 'stdio',
         command: nodeBin,
-        args: [mcpServerPath],
-        env: {
-          CLAUDE_GUI_PERMISSION_PORT: String(permissionPort)
-        }
+        args: [getMcpServerPath('mcp-permission-server.js')],
+        env: portEnv
+      },
+      'context': {
+        type: 'stdio',
+        command: nodeBin,
+        args: [getMcpServerPath('mcp-context-server.js')],
+        env: portEnv
       }
     }
   };
-
-  // Add brain MCP if configured
-  const brain = loadBrainConfig();
-  if (brain && brain.mcpDistPath && brain.brainUrl) {
-    config.mcpServers['brain'] = {
-      type: 'stdio',
-      command: nodeBin,
-      args: [brain.mcpDistPath],
-      env: {
-        BRAIN_URL: brain.brainUrl,
-        BRAIN_API_KEY: brain.brainApiKey || ''
-      }
-    };
-  }
 
   mcpConfigPath = path.join(os.tmpdir(), `claude-gui-mcp-${process.pid}.json`);
   fs.writeFileSync(mcpConfigPath, JSON.stringify(config, null, 2));
@@ -227,6 +344,7 @@ function cleanup() {
   if (currentProcess) currentProcess.kill('SIGTERM');
   if (permissionServer) permissionServer.close();
   if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch (e) {}
+  if (contextDb) try { contextDb.close(); } catch (e) {}
 }
 
 app.on('window-all-closed', () => {
@@ -236,22 +354,24 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', cleanup);
 
-// Window controls
-ipcMain.on('window:minimize', () => mainWindow.minimize());
-ipcMain.on('window:maximize', () => {
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  else mainWindow.maximize();
-});
-ipcMain.on('window:close', () => mainWindow.close());
-
 // Open external links
 ipcMain.on('shell:open-external', (_, url) => {
   shell.openExternal(url);
 });
 
+// Project folder picker
+ipcMain.handle('project:pick', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    title: 'Select project folder',
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 // ===== Claude CLI Integration =====
 ipcMain.on('claude:send-prompt', (event, data) => {
-  const { prompt, sessionId, isFirst } = data;
+  const { prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs } = data;
 
   if (currentProcess) {
     currentProcess.kill('SIGTERM');
@@ -264,8 +384,24 @@ ipcMain.on('claude:send-prompt', (event, data) => {
     '--output-format', 'stream-json',
     '--verbose',
     '--mcp-config', mcpConfigPath,
-    '--permission-prompt-tool', 'mcp__gui_permissions__approve_permission'
   ];
+
+  if (yolo) {
+    args.push('--dangerously-skip-permissions');
+  } else {
+    args.push('--permission-prompt-tool', 'mcp__gui_permissions__approve_permission');
+  }
+
+  if (model) {
+    args.push('--model', model);
+  }
+
+  if (Array.isArray(extraDirs) && extraDirs.length) {
+    const valid = extraDirs.filter(d => d && fs.existsSync(d));
+    if (valid.length) {
+      args.push('--add-dir', ...valid);
+    }
+  }
 
   if (sessionId) {
     if (isFirst) {
@@ -275,7 +411,10 @@ ipcMain.on('claude:send-prompt', (event, data) => {
     }
   }
 
+  const cwd = (projectPath && fs.existsSync(projectPath)) ? projectPath : undefined;
+
   const child = spawn(claudeBin, args, {
+    cwd,
     env: {
       ...process.env,
       PATH: [
@@ -340,6 +479,9 @@ function processStreamEvent(event, obj) {
       if (block.type === 'text' && block.text) {
         event.sender.send('claude:stream-delta', { text: block.text });
       }
+      if (block.type === 'thinking' && block.thinking) {
+        event.sender.send('claude:thinking-delta', { text: block.thinking });
+      }
       if (block.type === 'tool_use') {
         event.sender.send('claude:tool-use', {
           name: block.name,
@@ -364,39 +506,3 @@ ipcMain.on('claude:stop-generation', () => {
   }
 });
 
-// ===== Brain API (direct HTTP calls for the memories panel) =====
-function getBrainCredentials() {
-  const brain = loadBrainConfig();
-  if (!brain || !brain.brainUrl) return null;
-  return { url: brain.brainUrl, key: brain.brainApiKey || '' };
-}
-
-async function brainFetch(path, options = {}) {
-  const brain = getBrainCredentials();
-  if (!brain) throw new Error('Brain not configured');
-
-  const headers = { 'Content-Type': 'application/json' };
-  if (brain.key) headers['Authorization'] = `Bearer ${brain.key}`;
-
-  const res = await fetch(`${brain.url}${path}`, { headers, ...options });
-  if (!res.ok) throw new Error(`Brain API: ${res.status}`);
-  return res.json();
-}
-
-ipcMain.handle('brain:list', async (_, category) => {
-  const path = category ? `/memories?category=${encodeURIComponent(category)}` : '/memories';
-  return brainFetch(path);
-});
-
-ipcMain.handle('brain:search', async (_, query) => {
-  return brainFetch(`/memories/search?q=${encodeURIComponent(query)}`);
-});
-
-ipcMain.handle('brain:delete', async (_, id) => {
-  return brainFetch(`/memories/${id}`, { method: 'DELETE' });
-});
-
-ipcMain.handle('brain:status', async () => {
-  const brain = getBrainCredentials();
-  return { configured: !!brain };
-});

@@ -60,10 +60,11 @@ contextBridge.exposeInMainWorld('libs', {
 });
 
 contextBridge.exposeInMainWorld('claude', {
-  sendPrompt: (prompt, sessionId, isFirst) => ipcRenderer.send('claude:send-prompt', { prompt, sessionId, isFirst }),
+  sendPrompt: (prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs) => ipcRenderer.send('claude:send-prompt', { prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs }),
   stopGeneration: () => ipcRenderer.send('claude:stop-generation'),
   onStreamStart: (callback) => ipcRenderer.on('claude:stream-start', (_, data) => callback(data)),
   onStreamDelta: (callback) => ipcRenderer.on('claude:stream-delta', (_, data) => callback(data)),
+  onThinkingDelta: (callback) => ipcRenderer.on('claude:thinking-delta', (_, data) => callback(data)),
   onStreamEnd: (callback) => ipcRenderer.on('claude:stream-end', (_, data) => callback(data)),
   onStreamError: (callback) => ipcRenderer.on('claude:stream-error', (_, error) => callback(error)),
   onStreamClose: (callback) => ipcRenderer.on('claude:stream-close', (_, data) => callback(data)),
@@ -73,6 +74,7 @@ contextBridge.exposeInMainWorld('claude', {
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('claude:stream-start');
     ipcRenderer.removeAllListeners('claude:stream-delta');
+    ipcRenderer.removeAllListeners('claude:thinking-delta');
     ipcRenderer.removeAllListeners('claude:stream-end');
     ipcRenderer.removeAllListeners('claude:stream-error');
     ipcRenderer.removeAllListeners('claude:stream-close');
@@ -81,20 +83,11 @@ contextBridge.exposeInMainWorld('claude', {
   }
 });
 
-contextBridge.exposeInMainWorld('windowControls', {
-  minimize: () => ipcRenderer.send('window:minimize'),
-  maximize: () => ipcRenderer.send('window:maximize'),
-  close: () => ipcRenderer.send('window:close'),
-  onMaximized: (callback) => ipcRenderer.on('window:maximized', (_, isMaximized) => callback(isMaximized))
-});
-
 contextBridge.exposeInMainWorld('shellAPI', {
   openExternal: (url) => ipcRenderer.send('shell:open-external', url)
 });
 
-contextBridge.exposeInMainWorld('brain', {
-  list: (category) => ipcRenderer.invoke('brain:list', category),
-  search: (query) => ipcRenderer.invoke('brain:search', query),
-  delete: (id) => ipcRenderer.invoke('brain:delete', id),
-  status: () => ipcRenderer.invoke('brain:status'),
+contextBridge.exposeInMainWorld('project', {
+  pick: () => ipcRenderer.invoke('project:pick'),
 });
+

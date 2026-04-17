@@ -49,6 +49,10 @@
       {
         "from": "mcp-permission-server.js",
         "to": "mcp-permission-server.js"
+      },
+      {
+        "from": "mcp-context-server.js",
+        "to": "mcp-context-server.js"
       }
     ],
     "files": [
