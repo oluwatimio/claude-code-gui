@@ -4,6 +4,8 @@ const state = {
   currentConversationId: null,
   isStreaming: false,
   currentStreamContent: '',
+  currentThinkingContent: '',
+  yolo: false,
 };
 
 // ===== DOM Elements =====
@@ -18,6 +20,38 @@ const newChatBtn = document.getElementById('new-chat-btn');
 const conversationList = document.getElementById('conversation-list');
 const toggleSidebarBtn = document.getElementById('toggle-sidebar-btn');
 const sidebar = document.getElementById('sidebar');
+const projectPill = document.getElementById('project-pill');
+const projectLabel = document.getElementById('project-label');
+const extraDirsList = document.getElementById('extra-dirs-list');
+const addDirBtn = document.getElementById('add-dir-btn');
+const modelSelector = document.getElementById('model-selector');
+const modelLabel = document.getElementById('model-label');
+const modelMenu = document.getElementById('model-menu');
+
+// Model options. `value: null` means "don't pass --model" (use user's global default).
+// Label = what humans read. id = the literal CLI value passed via --model.
+const MODELS = [
+  { section: 'Default' },
+  { label: 'Use global default', short: 'Default', value: null, id: 'from ~/.claude/settings.json' },
+
+  { section: 'Current versions' },
+  { label: 'Opus 4.7',              short: 'Opus 4.7',     value: 'claude-opus-4-7',           id: 'claude-opus-4-7' },
+  { label: 'Opus 4.7 · 1M context', short: 'Opus 4.7 1M',  value: 'claude-opus-4-7[1m]',       id: 'claude-opus-4-7[1m]' },
+  { label: 'Sonnet 4.6',            short: 'Sonnet 4.6',   value: 'claude-sonnet-4-6',         id: 'claude-sonnet-4-6' },
+  { label: 'Haiku 4.5',             short: 'Haiku 4.5',    value: 'claude-haiku-4-5-20251001', id: 'claude-haiku-4-5-20251001' },
+
+  { section: 'Track latest (auto-updates)' },
+  { label: 'Latest Opus',               short: 'opus',     value: 'opus',     id: 'opus' },
+  { label: 'Latest Opus · 1M context',  short: 'opus 1M',  value: 'opus[1m]', id: 'opus[1m]' },
+  { label: 'Latest Sonnet',             short: 'sonnet',   value: 'sonnet',   id: 'sonnet' },
+  { label: 'Latest Haiku',              short: 'haiku',    value: 'haiku',    id: 'haiku' },
+];
+
+function findModelLabel(value) {
+  if (value == null) return 'Default';
+  const m = MODELS.find(o => !o.section && o.value === value);
+  return m ? m.short : value;
+}
 
 // ===== Helpers =====
 function escapeHtml(text) {
@@ -30,8 +64,137 @@ function renderMarkdown(text) {
   return window.libs.renderMarkdown(text);
 }
 
+function basename(p) {
+  if (!p) return '';
+  const parts = p.split('/').filter(Boolean);
+  return parts[parts.length - 1] || p;
+}
+
+function renderProjectPill() {
+  const conv = getCurrentConversation();
+  const path = conv && conv.projectPath;
+  if (path) {
+    projectLabel.textContent = basename(path);
+    projectPill.title = path;
+    projectPill.classList.add('has-project');
+  } else {
+    projectLabel.textContent = 'No project';
+    projectPill.title = 'Select project folder';
+    projectPill.classList.remove('has-project');
+  }
+  renderExtraDirs();
+}
+
+function renderExtraDirs() {
+  extraDirsList.innerHTML = '';
+  const conv = getCurrentConversation();
+  const dirs = (conv && conv.extraDirs) || [];
+  for (const dir of dirs) {
+    const chip = document.createElement('div');
+    chip.className = 'extra-dir-chip';
+    chip.title = dir;
+
+    const label = document.createElement('span');
+    label.className = 'extra-dir-label';
+    label.textContent = basename(dir);
+    chip.appendChild(label);
+
+    const remove = document.createElement('button');
+    remove.className = 'extra-dir-remove';
+    remove.type = 'button';
+    remove.title = 'Remove';
+    remove.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <path d="M18 6L6 18M6 6l12 12"/>
+    </svg>`;
+    remove.onclick = () => {
+      const c = getCurrentConversation();
+      if (!c || !c.extraDirs) return;
+      c.extraDirs = c.extraDirs.filter(d => d !== dir);
+      saveState();
+      renderExtraDirs();
+    };
+    chip.appendChild(remove);
+
+    extraDirsList.appendChild(chip);
+  }
+}
+
+function renderModelSelector() {
+  const conv = getCurrentConversation();
+  const current = conv ? (conv.model ?? null) : null;
+  modelLabel.textContent = findModelLabel(current);
+  modelSelector.title = current == null
+    ? 'Using global default model · click to change'
+    : `Model: ${current} · click to change`;
+}
+
+function buildModelMenu() {
+  const conv = getCurrentConversation();
+  const current = conv ? (conv.model ?? null) : null;
+  modelMenu.innerHTML = '';
+  for (const entry of MODELS) {
+    if (entry.section) {
+      const h = document.createElement('div');
+      h.className = 'model-section-header';
+      h.textContent = entry.section;
+      modelMenu.appendChild(h);
+      continue;
+    }
+    const opt = document.createElement('div');
+    opt.className = 'model-option' + (entry.value === current ? ' active' : '');
+    const lbl = document.createElement('span');
+    lbl.className = 'model-option-label';
+    lbl.textContent = entry.label;
+    const id = document.createElement('span');
+    id.className = 'model-option-id';
+    id.textContent = entry.id;
+    opt.appendChild(lbl);
+    opt.appendChild(id);
+    opt.onclick = () => {
+      let c = getCurrentConversation();
+      if (!c) c = createConversation('New Chat');
+      c.model = entry.value;
+      saveState();
+      renderModelSelector();
+      closeModelMenu();
+    };
+    modelMenu.appendChild(opt);
+  }
+}
+
+function openModelMenu() {
+  buildModelMenu();
+  modelMenu.classList.remove('hidden');
+  modelSelector.classList.add('open');
+}
+
+function closeModelMenu() {
+  modelMenu.classList.add('hidden');
+  modelSelector.classList.remove('open');
+}
+
 // ===== Message Rendering =====
-function createMessageEl(role, content, isStreaming = false) {
+function createThinkingBlock(text, expanded = false) {
+  const wrap = document.createElement('div');
+  wrap.className = 'thinking-block' + (expanded ? ' expanded' : '');
+  wrap.innerHTML = `
+    <button class="thinking-toggle" type="button">
+      <svg class="thinking-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+      <span class="thinking-label">Thinking</span>
+    </button>
+    <div class="thinking-body"></div>
+  `;
+  const body = wrap.querySelector('.thinking-body');
+  body.textContent = text || '';
+  wrap.querySelector('.thinking-toggle').addEventListener('click', () => {
+    wrap.classList.toggle('expanded');
+  });
+  return wrap;
+}
+
+function createMessageEl(role, content, isStreaming = false, thinking = '') {
   const msg = document.createElement('div');
   msg.className = `message message-${role}`;
 
@@ -76,6 +239,9 @@ function createMessageEl(role, content, isStreaming = false) {
   }
 
   msg.appendChild(header);
+  if (role === 'assistant' && thinking) {
+    msg.appendChild(createThinkingBlock(thinking, false));
+  }
   msg.appendChild(body);
   return msg;
 }
@@ -125,7 +291,7 @@ function switchConversation(id) {
   // Re-render messages
   messagesEl.innerHTML = '';
   for (const msg of conv.messages) {
-    messagesEl.appendChild(createMessageEl(msg.role, msg.content));
+    messagesEl.appendChild(createMessageEl(msg.role, msg.content, false, msg.thinking || ''));
   }
 
   if (conv.messages.length > 0) {
@@ -138,6 +304,8 @@ function switchConversation(id) {
   }
 
   renderConversationList();
+  renderProjectPill();
+  renderModelSelector();
   saveState();
 }
 
@@ -160,8 +328,22 @@ function renderConversationList() {
   for (const conv of state.conversations) {
     const item = document.createElement('div');
     item.className = `conversation-item ${conv.id === state.currentConversationId ? 'active' : ''}`;
-    item.textContent = conv.title;
-    item.title = conv.title;
+    item.title = conv.projectPath ? `${conv.title}\n${conv.projectPath}` : conv.title;
+
+    const title = document.createElement('div');
+    title.className = 'conv-title';
+    title.textContent = conv.title;
+    item.appendChild(title);
+
+    if (conv.projectPath) {
+      const sub = document.createElement('div');
+      sub.className = 'conv-subtitle';
+      sub.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </svg><span></span>`;
+      sub.querySelector('span').textContent = basename(conv.projectPath);
+      item.appendChild(sub);
+    }
 
     const delBtn = document.createElement('button');
     delBtn.className = 'delete-btn';
@@ -187,6 +369,8 @@ function newChat() {
   inputEl.value = '';
   autoResize();
   renderConversationList();
+  renderProjectPill();
+  renderModelSelector();
   inputEl.focus();
 }
 
@@ -196,6 +380,7 @@ function saveState() {
     localStorage.setItem('claude-gui-state', JSON.stringify({
       conversations: state.conversations,
       currentConversationId: state.currentConversationId,
+      yolo: state.yolo,
     }));
   } catch (e) {
     // Silently fail on storage quota
@@ -209,6 +394,7 @@ function loadState() {
       const data = JSON.parse(saved);
       state.conversations = data.conversations || [];
       state.currentConversationId = data.currentConversationId;
+      state.yolo = !!data.yolo;
     }
   } catch (e) {
     // Start fresh
@@ -242,6 +428,7 @@ function sendMessage(prompt) {
   // Create assistant placeholder
   state.isStreaming = true;
   state.currentStreamContent = '';
+  state.currentThinkingContent = '';
   currentAssistantEl = createMessageEl('assistant', '', true);
   messagesEl.appendChild(currentAssistantEl);
   scrollToBottom();
@@ -256,7 +443,22 @@ function sendMessage(prompt) {
 
   // Send to Claude with session context
   const isFirstMessage = conv.messages.length === 1; // just the user message we added
-  window.claude.sendPrompt(prompt, conv.sessionId, isFirstMessage);
+  window.claude.sendPrompt(prompt, conv.sessionId, isFirstMessage, state.yolo, conv.projectPath, conv.model ?? null, conv.extraDirs ?? []);
+}
+
+function handleThinkingDelta(data) {
+  if (!data || !data.text || !currentAssistantEl) return;
+  state.currentThinkingContent += data.text;
+  let block = currentAssistantEl.querySelector(':scope > .thinking-block');
+  if (!block) {
+    block = createThinkingBlock('', true);
+    const body = currentAssistantEl.querySelector('.message-body');
+    currentAssistantEl.insertBefore(block, body);
+  }
+  const bodyEl = block.querySelector('.thinking-body');
+  bodyEl.textContent = state.currentThinkingContent;
+  setStatus('streaming', 'Thinking...');
+  scrollToBottom();
 }
 
 function handleDelta(data) {
@@ -286,12 +488,14 @@ function handleStreamEnd(data) {
     const body = currentAssistantEl.querySelector('.message-body');
     body.innerHTML = renderMarkdown(state.currentStreamContent);
     body.classList.remove('streaming-cursor');
+    const think = currentAssistantEl.querySelector(':scope > .thinking-block');
+    if (think) think.classList.remove('expanded');
   }
 
   // Save assistant message
   const conv = getCurrentConversation();
   if (conv) {
-    conv.messages.push({ role: 'assistant', content: state.currentStreamContent });
+    conv.messages.push({ role: 'assistant', content: state.currentStreamContent, thinking: state.currentThinkingContent });
     saveState();
   }
 
@@ -355,7 +559,7 @@ function stopGeneration() {
 
   const conv = getCurrentConversation();
   if (conv && state.currentStreamContent) {
-    conv.messages.push({ role: 'assistant', content: state.currentStreamContent });
+    conv.messages.push({ role: 'assistant', content: state.currentStreamContent, thinking: state.currentThinkingContent });
     saveState();
   }
 
@@ -447,91 +651,6 @@ function hidePermissionDialog() {
   permOverlay.classList.add('hidden');
 }
 
-// ===== Memory Panel =====
-const memoryList = document.getElementById('memory-list');
-const memoryEmpty = document.getElementById('memory-empty');
-const memorySearch = document.getElementById('memory-search');
-let memorySearchTimeout = null;
-
-async function loadMemories(query) {
-  memoryList.innerHTML = '<div class="memory-loading"><span class="status-dot streaming"></span> Loading...</div>';
-  memoryEmpty.classList.add('hidden');
-
-  try {
-    let memories;
-    if (query && query.trim()) {
-      memories = await window.brain.search(query.trim());
-    } else {
-      memories = await window.brain.list();
-    }
-
-    memoryList.innerHTML = '';
-    if (memories.length === 0) {
-      memoryEmpty.classList.remove('hidden');
-      return;
-    }
-
-    for (const mem of memories) {
-      memoryList.appendChild(createMemoryCard(mem));
-    }
-  } catch (e) {
-    memoryList.innerHTML = '';
-    memoryEmpty.classList.remove('hidden');
-    memoryEmpty.querySelector('p').textContent = 'Could not connect to Brain';
-  }
-}
-
-function createMemoryCard(mem) {
-  const card = document.createElement('div');
-  card.className = 'memory-card';
-
-  const content = document.createElement('div');
-  content.className = 'memory-content';
-  content.textContent = mem.content;
-
-  const meta = document.createElement('div');
-  meta.className = 'memory-meta';
-
-  if (mem.category) {
-    const cat = document.createElement('span');
-    cat.className = 'memory-category';
-    cat.textContent = mem.category;
-    meta.appendChild(cat);
-  }
-
-  if (mem.tags && mem.tags.length) {
-    for (const tag of mem.tags.slice(0, 3)) {
-      const t = document.createElement('span');
-      t.className = 'memory-tag';
-      t.textContent = tag;
-      meta.appendChild(t);
-    }
-  }
-
-  const date = document.createElement('span');
-  date.className = 'memory-date';
-  date.textContent = new Date(mem.createdAt).toLocaleDateString();
-  meta.appendChild(date);
-
-  const delBtn = document.createElement('button');
-  delBtn.className = 'memory-delete';
-  delBtn.title = 'Delete memory';
-  delBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12" stroke-linecap="round"/></svg>';
-  delBtn.onclick = async (e) => {
-    e.stopPropagation();
-    await window.brain.delete(mem.id);
-    card.remove();
-    if (memoryList.children.length === 0) {
-      memoryEmpty.classList.remove('hidden');
-    }
-  };
-
-  card.appendChild(content);
-  card.appendChild(meta);
-  card.appendChild(delBtn);
-  return card;
-}
-
 // ===== Event Listeners =====
 function init() {
   // Load state
@@ -540,12 +659,15 @@ function init() {
     switchConversation(state.currentConversationId);
   }
   renderConversationList();
+  renderProjectPill();
+  renderModelSelector();
 
   // IPC listeners
   window.claude.onStreamStart(() => {
     setStatus('streaming', 'Connected...');
   });
   window.claude.onStreamDelta(handleDelta);
+  window.claude.onThinkingDelta(handleThinkingDelta);
   window.claude.onStreamEnd(handleStreamEnd);
   window.claude.onStreamError(handleStreamError);
   window.claude.onStreamClose(handleStreamClose);
@@ -609,11 +731,86 @@ function init() {
   // External links
   messagesEl.addEventListener('click', handleLinkClick);
 
+  // Model selector
+  modelSelector.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (modelMenu.classList.contains('hidden')) openModelMenu();
+    else closeModelMenu();
+  });
+  document.addEventListener('click', (e) => {
+    if (!modelMenu.classList.contains('hidden') &&
+        !modelMenu.contains(e.target) &&
+        e.target !== modelSelector) {
+      closeModelMenu();
+    }
+  });
+
+  // Project pill
+  projectPill.addEventListener('click', async () => {
+    const picked = await window.project.pick();
+    if (!picked) return;
+    let conv = getCurrentConversation();
+    if (!conv) {
+      conv = createConversation(basename(picked) || 'New Chat');
+    }
+    conv.projectPath = picked;
+    saveState();
+    renderProjectPill();
+    renderConversationList();
+  });
+
+  // Add extra context folder
+  addDirBtn.addEventListener('click', async () => {
+    const picked = await window.project.pick();
+    if (!picked) return;
+    let conv = getCurrentConversation();
+    if (!conv) conv = createConversation('New Chat');
+    if (!Array.isArray(conv.extraDirs)) conv.extraDirs = [];
+    if (picked === conv.projectPath) return;
+    if (conv.extraDirs.includes(picked)) return;
+    conv.extraDirs.push(picked);
+    saveState();
+    renderExtraDirs();
+  });
+
+  // Save memory
+  const saveMemoryBtn = document.getElementById('btn-save-memory');
+  saveMemoryBtn.addEventListener('click', () => {
+    if (state.isStreaming) return;
+    const conv = getCurrentConversation();
+    if (!conv || conv.messages.length === 0) return;
+    const prompt =
+      "Save the most important takeaways from our conversation as a memory by calling the `remember` tool on the `context` MCP server. " +
+      "Write a concise, self-contained summary (what was discussed, what was decided, any facts or preferences worth recalling in future chats). " +
+      "Pick an appropriate category and a few tags. Confirm briefly once saved.";
+    sendMessage(prompt);
+  });
+
+  // YOLO toggle
+  const yoloBtn = document.getElementById('btn-yolo');
+  const applyYoloUI = () => {
+    yoloBtn.classList.toggle('active', state.yolo);
+    yoloBtn.title = state.yolo
+      ? 'YOLO mode ON — permissions skipped. Click to disable.'
+      : 'YOLO mode — skip all permission prompts';
+  };
+  applyYoloUI();
+  yoloBtn.addEventListener('click', () => {
+    if (!state.yolo) {
+      const ok = confirm(
+        'Enable YOLO mode?\n\n' +
+        'Claude will run all tools (including shell commands and file writes) ' +
+        'without asking for permission. Only use in trusted environments.'
+      );
+      if (!ok) return;
+    }
+    state.yolo = !state.yolo;
+    applyYoloUI();
+    saveState();
+  });
+
   // Titlebar
   document.getElementById('btn-toggle-sidebar').addEventListener('click', () => sidebar.classList.toggle('collapsed'));
-  document.getElementById('btn-minimize').addEventListener('click', () => window.windowControls.minimize());
-  document.getElementById('btn-maximize').addEventListener('click', () => window.windowControls.maximize());
-  document.getElementById('btn-close').addEventListener('click', () => window.windowControls.close());
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
@@ -631,34 +828,6 @@ function init() {
       e.preventDefault();
       sidebar.classList.toggle('collapsed');
     }
-  });
-
-  // Maximize state
-  window.windowControls.onMaximized((isMaximized) => {
-    const btn = document.getElementById('btn-maximize');
-    btn.title = isMaximized ? 'Restore' : 'Maximize';
-  });
-
-  // Sidebar tabs
-  document.querySelectorAll('.sidebar-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
-
-      if (tab.dataset.tab === 'memories') {
-        loadMemories();
-      }
-    });
-  });
-
-  // Memory search
-  memorySearch.addEventListener('input', () => {
-    clearTimeout(memorySearchTimeout);
-    memorySearchTimeout = setTimeout(() => {
-      loadMemories(memorySearch.value);
-    }, 300);
   });
 
   // Initial status

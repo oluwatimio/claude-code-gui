@@ -14,7 +14,6 @@ Black, white, and green. Minimal. Fast.
 - **Markdown rendering** with syntax-highlighted code blocks (highlight.js)
 - **Permission approvals** surfaced as UI dialogs (via `--permission-prompt-tool`)
 - **Session persistence** - conversations maintain context across messages
-- **Brain MCP integration** - view, search, and delete memories from the sidebar
 - **Copy code blocks** with one click
 - **Keyboard shortcuts** - Enter to send, Ctrl+N new chat, Ctrl+B toggle sidebar, Escape to stop
 - **Custom titlebar** with frameless window
@@ -60,31 +59,6 @@ chmod +x dist/Claude\ Code-1.0.0.AppImage
 npm run build
 ```
 
-## Brain MCP Setup (Optional)
-
-The app integrates with [Brain](https://github.com/oluwatimio/brain), a persistent memory server for AI tools. If configured, a **Memories** tab appears in the sidebar where you can view, search, and delete memories.
-
-### Deploy Brain to Cloud Run
-
-```bash
-cd ~/github/brain
-./deploy.sh
-```
-
-This creates a Cloud SQL Postgres instance and deploys the server. After deploy, it automatically configures both the CLI and GUI.
-
-### Manual configuration
-
-If you need to configure manually:
-
-```bash
-BRAIN_URL=https://your-brain-url BRAIN_API_KEY=your-key node ~/github/brain/setup-claude.js
-```
-
-This writes to:
-- `~/.claude.json` - for the Claude Code CLI (via `claude mcp add`)
-- `~/.config/claude-code-gui/brain.json` - for the GUI app
-
 ## Architecture
 
 ```
@@ -92,7 +66,6 @@ claude-code-gui/
 ├── main.js                    # Electron main process
 │                              #   - Spawns claude -p with --session-id/--resume
 │                              #   - HTTP bridge for permission approvals
-│                              #   - Brain API proxy for memories panel
 │                              #   - MCP config generation (temp file)
 ├── preload.js                 # Context bridge (IPC + markdown rendering)
 ├── mcp-permission-server.js   # MCP stdio server for --permission-prompt-tool
@@ -111,7 +84,7 @@ claude-code-gui/
 
 1. User sends a message in the GUI
 2. `main.js` spawns `claude -p --session-id <uuid>` (first message) or `claude -p --resume <uuid>` (follow-ups)
-3. The CLI's `--mcp-config` includes a permission MCP server and optionally the Brain MCP server
+3. The CLI's `--mcp-config` includes a permission MCP server
 4. When Claude needs permission (file write, bash command, etc.), the MCP server POSTs to an HTTP bridge in the Electron main process, which shows a dialog in the UI
 5. User clicks Allow/Deny, response flows back through the bridge to Claude
 6. Claude's response is parsed from stream-json and rendered as markdown
