@@ -377,6 +377,7 @@ function createConversation(title) {
     streamThinking: '',
     worktreePath: null,
     worktreeBranch: null,
+    pendingNewSession: false,
   };
   state.conversations.unshift(conv);
   state.currentConversationId = conv.id;
@@ -636,7 +637,8 @@ function sendMessage(prompt) {
   stopBtn.classList.remove('hidden');
   setStatus('streaming', 'Thinking...');
 
-  const isFirstMessage = conv.messages.length === 1;
+  const isFirstMessage = conv.messages.length === 1 || conv.pendingNewSession === true;
+  conv.pendingNewSession = false;
   window.claude.sendPrompt(conv.id, prompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? []);
   renderConversationList();
 }
@@ -1633,6 +1635,7 @@ async function toggleWorktree() {
     conv.worktreePath = null;
     conv.worktreeBranch = null;
     conv.sessionId = generateUUID();
+    conv.pendingNewSession = true;
     saveState();
     renderProjectPill();
     refreshBranch();
@@ -1665,6 +1668,7 @@ async function toggleWorktree() {
     conv.worktreePath = res.worktreePath;
     conv.worktreeBranch = res.branch;
     conv.sessionId = generateUUID();
+    conv.pendingNewSession = true;
     saveState();
     renderProjectPill();
     refreshBranch();

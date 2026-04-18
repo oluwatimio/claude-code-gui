@@ -783,7 +783,7 @@ ipcMain.on('claude:send-prompt', (event, data) => {
   child.stderr.on('data', (data) => {
     const text = data.toString().trim();
     if (!text) return;
-    if (text.includes('Error') || text.includes('error') || text.includes('fatal') || text.includes('not found') || text.includes('ENOENT') || text.includes('failed')) {
+    if (text.includes('Error') || text.includes('error') || text.includes('fatal') || text.includes('not found') || text.includes('No conversation found') || text.includes('ENOENT') || text.includes('failed')) {
       event.sender.send('claude:stream-error', { convId, error: text });
     }
   });
@@ -823,6 +823,11 @@ function processStreamEvent(event, convId, obj) {
       }
     }
   } else if (obj.type === 'result') {
+    if (obj.is_error) {
+      const msg = (Array.isArray(obj.errors) && obj.errors.length) ? obj.errors.join('; ') : (obj.subtype || 'Claude CLI returned an error');
+      event.sender.send('claude:stream-error', { convId, error: msg });
+      return;
+    }
     event.sender.send('claude:stream-end', {
       convId,
       result: obj.result,
