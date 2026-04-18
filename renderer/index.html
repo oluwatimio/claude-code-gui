@@ -37,15 +37,27 @@
   <div id="app">
     <!-- Sidebar -->
     <aside id="sidebar">
-      <div class="sidebar-header">
-        <button id="new-chat-btn" title="New Chat (Ctrl+N)">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
-          <span>New Chat</span>
-        </button>
+      <div class="sidebar-tabs">
+        <button class="sidebar-tab active" data-tab="chats">Chats</button>
+        <button class="sidebar-tab" data-tab="memories">Memories</button>
       </div>
-      <div id="conversation-list"></div>
+      <div id="chats-panel" class="sidebar-panel active">
+        <div class="sidebar-header">
+          <button id="new-chat-btn" title="New Chat (Ctrl+N)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            <span>New Chat</span>
+          </button>
+        </div>
+        <div id="conversation-list"></div>
+      </div>
+      <div id="memories-panel" class="sidebar-panel">
+        <div class="sidebar-header">
+          <input id="memory-search" type="text" placeholder="Search memories..." autocomplete="off">
+        </div>
+        <div id="memory-list"></div>
+      </div>
 
       <div class="sidebar-footer">
         <button id="toggle-sidebar-btn" title="Toggle Sidebar">

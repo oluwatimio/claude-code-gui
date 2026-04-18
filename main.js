@@ -493,6 +493,17 @@ ipcMain.handle('fs:path-info', async (_, roots, p) => {
   }
 });
 
+// ===== Context memory (renderer access) =====
+ipcMain.handle('context:recall', async (_, args) => {
+  try { return contextRecall(args || {}); }
+  catch (e) { return { memories: [], error: e.message }; }
+});
+
+ipcMain.handle('context:forget', async (_, args) => {
+  try { return contextForget(args || {}); }
+  catch (e) { return { deleted: false, error: e.message }; }
+});
+
 // ===== Git branch =====
 const { execFile } = require('child_process');
 const branchWatchers = new Map(); // cwd -> fs.FSWatcher

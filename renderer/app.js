@@ -51,6 +51,11 @@ const killTerminalBtn = document.getElementById('btn-terminal-kill');
 const closeTerminalBtn = document.getElementById('btn-terminal-close');
 const branchPill = document.getElementById('branch-pill');
 const branchLabel = document.getElementById('branch-label');
+const sidebarTabs = document.querySelectorAll('.sidebar-tab');
+const chatsPanelEl = document.getElementById('chats-panel');
+const memoriesPanelEl = document.getElementById('memories-panel');
+const memorySearchEl = document.getElementById('memory-search');
+const memoryListEl = document.getElementById('memory-list');
 
 // Model options. `value: null` means "don't pass --model" (use user's global default).
 // Label = what humans read. id = the literal CLI value passed via --model.
@@ -1373,6 +1378,116 @@ function setupTerminalAutoFit() {
   window.addEventListener('resize', scheduleTerminalFit);
 }
 
+// ===== Sidebar Tabs / Memories =====
+let currentSidebarTab = 'chats';
+let memorySearchDebounce = null;
+
+function switchSidebarTab(name) {
+  if (name !== 'chats' && name !== 'memories') return;
+  currentSidebarTab = name;
+  sidebarTabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === name));
+  chatsPanelEl.classList.toggle('active', name === 'chats');
+  memoriesPanelEl.classList.toggle('active', name === 'memories');
+  if (name === 'memories') {
+    renderMemories(memorySearchEl.value.trim());
+  }
+}
+
+function formatMemoryDate(ts) {
+  if (!ts) return '';
+  const now = Date.now();
+  const diff = now - ts;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const d = Math.floor(hr / 24);
+  if (d < 7) return `${d}d ago`;
+  const date = new Date(ts);
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+async function renderMemories(query = '') {
+  memoryListEl.innerHTML = '<div class="memory-empty">Loading...</div>';
+  let res;
+  try {
+    res = await window.memory.list(query, 200);
+  } catch (e) {
+    memoryListEl.innerHTML = `<div class="memory-empty">Error: ${escapeHtml(e.message || String(e))}</div>`;
+    return;
+  }
+  const memories = (res && res.memories) || [];
+  if (res && res.error) {
+    memoryListEl.innerHTML = `<div class="memory-empty">Error: ${escapeHtml(res.error)}</div>`;
+    return;
+  }
+  if (memories.length === 0) {
+    memoryListEl.innerHTML = query
+      ? `<div class="memory-empty">No memories match "${escapeHtml(query)}"</div>`
+      : '<div class="memory-empty">No memories yet. Click "Save memory" after a chat to keep context for next time.</div>';
+    return;
+  }
+  memoryListEl.innerHTML = '';
+  memories.forEach(m => {
+    const item = document.createElement('div');
+    item.className = 'memory-item';
+    item.dataset.id = m.id;
+
+    const content = document.createElement('div');
+    content.className = 'memory-content';
+    content.textContent = m.content || '';
+    item.appendChild(content);
+
+    const meta = document.createElement('div');
+    meta.className = 'memory-meta';
+    if (m.category) {
+      const cat = document.createElement('span');
+      cat.className = 'memory-category';
+      cat.textContent = m.category;
+      meta.appendChild(cat);
+    }
+    (m.tags || []).forEach(tag => {
+      const t = document.createElement('span');
+      t.className = 'memory-tag';
+      t.textContent = tag;
+      meta.appendChild(t);
+    });
+    const date = document.createElement('span');
+    date.className = 'memory-date';
+    date.textContent = formatMemoryDate(m.createdAt);
+    meta.appendChild(date);
+    item.appendChild(meta);
+
+    const forget = document.createElement('button');
+    forget.className = 'memory-forget';
+    forget.title = 'Forget this memory';
+    forget.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+    forget.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const ok = confirm('Forget this memory? This cannot be undone.');
+      if (!ok) return;
+      try {
+        await window.memory.forget(m.id);
+        item.remove();
+        if (memoryListEl.childElementCount === 0) {
+          renderMemories(memorySearchEl.value.trim());
+        }
+      } catch (err) {
+        alert('Failed to forget: ' + (err.message || String(err)));
+      }
+    });
+    item.appendChild(forget);
+
+    item.addEventListener('click', () => {
+      item.classList.toggle('expanded');
+    });
+
+    memoryListEl.appendChild(item);
+  });
+}
+
 function init() {
   // Load state
   loadState();
@@ -1471,6 +1586,17 @@ function init() {
   // Sidebar toggle
   toggleSidebarBtn.addEventListener('click', () => {
     sidebar.classList.toggle('collapsed');
+  });
+
+  // Sidebar tabs
+  sidebarTabs.forEach(tab => {
+    tab.addEventListener('click', () => switchSidebarTab(tab.getAttribute('data-tab')));
+  });
+  memorySearchEl.addEventListener('input', () => {
+    clearTimeout(memorySearchDebounce);
+    memorySearchDebounce = setTimeout(() => {
+      renderMemories(memorySearchEl.value.trim());
+    }, 200);
   });
 
   // Suggestion chips

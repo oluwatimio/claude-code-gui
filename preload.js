@@ -113,6 +113,11 @@ contextBridge.exposeInMainWorld('files', {
   pathInfo: (roots, p) => ipcRenderer.invoke('fs:path-info', roots, p),
 });
 
+contextBridge.exposeInMainWorld('memory', {
+  list: (query, limit) => ipcRenderer.invoke('context:recall', { query: query || '', limit: limit || 100 }),
+  forget: (id) => ipcRenderer.invoke('context:forget', { id }),
+});
+
 contextBridge.exposeInMainWorld('git', {
   branch: (cwd) => ipcRenderer.invoke('git:branch', cwd),
   watch: (cwd) => ipcRenderer.send('git:watch', { cwd }),
