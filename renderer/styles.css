@@ -1779,8 +1779,8 @@ html, body {
 }
 
 #workspace-panel.collapsed {
-  width: 0;
-  min-width: 0;
+  width: 0 !important;
+  min-width: 0 !important;
   border-left-width: 0;
   opacity: 0;
   pointer-events: none;
@@ -1803,8 +1803,8 @@ html, body {
               opacity var(--transition-normal);
 }
 #pr-panel.collapsed {
-  width: 0;
-  min-width: 0;
+  width: 0 !important;
+  min-width: 0 !important;
   border-left-width: 0;
   opacity: 0;
   pointer-events: none;
