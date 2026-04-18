@@ -1048,6 +1048,55 @@ html, body {
   white-space: nowrap;
 }
 
+#worktree-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  max-width: 180px;
+}
+#worktree-btn:hover {
+  background: var(--bg-surface);
+  border-color: #2a2a2a;
+  color: var(--text-primary);
+}
+#worktree-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+#worktree-btn svg {
+  flex-shrink: 0;
+}
+#worktree-btn.active svg {
+  color: var(--accent);
+}
+#worktree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-streaming-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: pulse 1.2s ease-in-out infinite;
+  box-shadow: 0 0 6px rgba(0, 210, 106, 0.6);
+}
+
 #input-wrapper {
   position: relative;
   background: var(--bg-secondary);
@@ -1248,7 +1297,7 @@ html, body {
 }
 
 /* ===== Permission Dialog ===== */
-#permission-overlay {
+#permission-overlay, #prompt-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.7);
@@ -1258,6 +1307,48 @@ html, body {
   justify-content: center;
   z-index: 1000;
   animation: fadeIn 0.15s ease-out;
+}
+
+#prompt-dialog {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+  animation: dialogEnter 0.2s ease-out;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+}
+#prompt-dialog h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: var(--text-primary);
+}
+.prompt-description {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+#prompt-input-field {
+  width: 100%;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  outline: none;
+  box-sizing: border-box;
+}
+#prompt-input-field:focus {
+  border-color: var(--accent);
+}
+.prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 
 #permission-dialog {

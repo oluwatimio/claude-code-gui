@@ -2,9 +2,6 @@
 const state = {
   conversations: [],
   currentConversationId: null,
-  isStreaming: false,
-  currentStreamContent: '',
-  currentThinkingContent: '',
   yolo: false,
   workspaceOpen: false,
   wsTreeHeight: 260,
@@ -13,6 +10,23 @@ const state = {
   terminalOpen: false,
   terminalHeight: 240,
 };
+
+// Per-conversation DOM + timer refs (not persisted)
+const assistantElByConv = new Map(); // convId -> HTMLElement
+const throttleTimerByConv = new Map(); // convId -> timeout id
+
+function getConversation(id) {
+  return state.conversations.find(c => c.id === id);
+}
+
+function isCurrentConv(convId) {
+  return convId && convId === state.currentConversationId;
+}
+
+function effectiveProjectPath(conv) {
+  if (!conv) return null;
+  return conv.worktreePath || conv.projectPath || null;
+}
 
 // ===== DOM Elements =====
 const welcomeEl = document.getElementById('welcome');
@@ -51,6 +65,7 @@ const killTerminalBtn = document.getElementById('btn-terminal-kill');
 const closeTerminalBtn = document.getElementById('btn-terminal-close');
 const branchPill = document.getElementById('branch-pill');
 const branchLabel = document.getElementById('branch-label');
+const worktreeBtn = document.getElementById('worktree-btn');
 const sidebarTabs = document.querySelectorAll('.sidebar-tab');
 const chatsPanelEl = document.getElementById('chats-panel');
 const memoriesPanelEl = document.getElementById('memories-panel');
@@ -103,7 +118,7 @@ let currentBranchWatchCwd = null;
 
 async function refreshBranch() {
   const conv = getCurrentConversation();
-  const cwd = conv && conv.projectPath;
+  const cwd = effectiveProjectPath(conv);
   if (!cwd) {
     branchPill.classList.add('hidden');
     branchLabel.textContent = '';
@@ -137,7 +152,7 @@ function renderProjectPill() {
   const path = conv && conv.projectPath;
   if (path) {
     projectLabel.textContent = basename(path);
-    projectPill.title = path;
+    projectPill.title = conv.worktreePath ? `${path}\n(worktree: ${conv.worktreePath})` : path;
     projectPill.classList.add('has-project');
   } else {
     projectLabel.textContent = 'No project';
@@ -145,6 +160,28 @@ function renderProjectPill() {
     projectPill.classList.remove('has-project');
   }
   renderExtraDirs();
+  renderWorktreeBtn();
+}
+
+function renderWorktreeBtn() {
+  if (!worktreeBtn) return;
+  const conv = getCurrentConversation();
+  if (!conv || !conv.projectPath) {
+    worktreeBtn.classList.add('hidden');
+    return;
+  }
+  worktreeBtn.classList.remove('hidden');
+  if (conv.worktreePath) {
+    worktreeBtn.classList.add('active');
+    worktreeBtn.title = `Worktree: ${conv.worktreeBranch || conv.worktreePath}\nClick to remove`;
+    const label = worktreeBtn.querySelector('#worktree-label');
+    if (label) label.textContent = conv.worktreeBranch || 'Worktree';
+  } else {
+    worktreeBtn.classList.remove('active');
+    worktreeBtn.title = 'Isolate this chat in a git worktree';
+    const label = worktreeBtn.querySelector('#worktree-label');
+    if (label) label.textContent = 'Worktree';
+  }
 }
 
 function renderExtraDirs() {
@@ -335,6 +372,11 @@ function createConversation(title) {
     title: title || 'New Chat',
     messages: [],
     createdAt: Date.now(),
+    streaming: false,
+    streamContent: '',
+    streamThinking: '',
+    worktreePath: null,
+    worktreeBranch: null,
   };
   state.conversations.unshift(conv);
   state.currentConversationId = conv.id;
@@ -358,7 +400,27 @@ function switchConversation(id) {
     messagesEl.appendChild(createMessageEl(msg.role, msg.content, false, msg.thinking || ''));
   }
 
-  if (conv.messages.length > 0) {
+  // If this conversation is streaming, rebuild the live placeholder with accumulated content
+  if (conv.streaming) {
+    const el = createMessageEl('assistant', conv.streamContent || '', true, conv.streamThinking || '');
+    if (conv.streamThinking) {
+      const think = el.querySelector(':scope > .thinking-block');
+      if (think) think.classList.add('expanded');
+    }
+    messagesEl.appendChild(el);
+    assistantElByConv.set(conv.id, el);
+    inputEl.disabled = true;
+    sendBtn.classList.add('hidden');
+    stopBtn.classList.remove('hidden');
+    setStatus('streaming', 'Generating...');
+  } else {
+    inputEl.disabled = false;
+    sendBtn.classList.remove('hidden');
+    stopBtn.classList.add('hidden');
+    setStatus('ready', 'Ready');
+  }
+
+  if (conv.messages.length > 0 || conv.streaming) {
     welcomeEl.classList.add('hidden');
     messagesEl.classList.remove('hidden');
     scrollToBottom();
@@ -378,13 +440,36 @@ function switchConversation(id) {
   saveState();
 }
 
-function deleteConversation(id) {
+async function deleteConversation(id) {
+  const conv = state.conversations.find(c => c.id === id);
+  if (conv && conv.worktreePath) {
+    try {
+      const st = await window.worktree.status(conv.worktreePath);
+      if (st.dirty || st.unpushed) {
+        const ok = confirm(
+          `Chat has an attached worktree with ${st.dirty ? 'uncommitted changes' : ''}${st.dirty && st.unpushed ? ' and ' : ''}${st.unpushed ? 'unpushed commits' : ''}.\n\n` +
+          `Delete the chat and remove the worktree anyway?`
+        );
+        if (!ok) return;
+      }
+      await window.worktree.remove(conv.worktreePath, true);
+    } catch (e) {
+      console.warn('worktree cleanup failed:', e);
+    }
+  }
+
+  window.claude.stopGeneration(id);
   window.terminal.kill(id);
+
   const entry = xtermByConv.get(id);
   if (entry) {
     try { entry.term.dispose(); } catch (e) {}
     xtermByConv.delete(id);
   }
+  assistantElByConv.delete(id);
+  const t = throttleTimerByConv.get(id);
+  if (t) { clearTimeout(t); throttleTimerByConv.delete(id); }
+
   state.conversations = state.conversations.filter(c => c.id !== id);
   if (state.currentConversationId === id) {
     if (state.conversations.length > 0) {
@@ -408,6 +493,11 @@ function renderConversationList() {
     const title = document.createElement('div');
     title.className = 'conv-title';
     title.textContent = conv.title;
+    if (conv.streaming) {
+      const dot = document.createElement('span');
+      dot.className = 'conv-streaming-dot';
+      title.appendChild(dot);
+    }
     item.appendChild(title);
 
     if (conv.projectPath) {
@@ -494,45 +584,51 @@ function loadState() {
       if (typeof data.terminalHeight === 'number' && data.terminalHeight >= 120) {
         state.terminalHeight = data.terminalHeight;
       }
+
+      // Reset any in-flight stream flags — processes don't survive app restarts
+      for (const conv of state.conversations) {
+        conv.streaming = false;
+        conv.streamContent = '';
+        conv.streamThinking = '';
+        if (conv.worktreePath === undefined) conv.worktreePath = null;
+        if (conv.worktreeBranch === undefined) conv.worktreeBranch = null;
+      }
     }
   } catch (e) {
     // Start fresh
   }
 }
 
-// ===== Streaming Integration =====
-let currentAssistantEl = null;
-let streamThrottleTimer = null;
+// ===== Streaming Integration (per-conversation) =====
 
 function sendMessage(prompt) {
-  if (!prompt.trim() || state.isStreaming) return;
+  if (!prompt.trim()) return;
 
-  // Ensure conversation exists
   let conv = getCurrentConversation();
   if (!conv) {
     const title = prompt.slice(0, 50) + (prompt.length > 50 ? '...' : '');
     conv = createConversation(title);
   }
 
-  // Show messages area
+  if (conv.streaming) return; // don't allow concurrent sends within the same conv
+
   welcomeEl.classList.add('hidden');
   messagesEl.classList.remove('hidden');
 
-  // Add user message
   conv.messages.push({ role: 'user', content: prompt });
   messagesEl.appendChild(createMessageEl('user', prompt));
   scrollToBottom();
   saveState();
 
-  // Create assistant placeholder
-  state.isStreaming = true;
-  state.currentStreamContent = '';
-  state.currentThinkingContent = '';
-  currentAssistantEl = createMessageEl('assistant', '', true);
-  messagesEl.appendChild(currentAssistantEl);
+  conv.streaming = true;
+  conv.streamContent = '';
+  conv.streamThinking = '';
+
+  const assistantEl = createMessageEl('assistant', '', true);
+  messagesEl.appendChild(assistantEl);
+  assistantElByConv.set(conv.id, assistantEl);
   scrollToBottom();
 
-  // Update UI
   inputEl.value = '';
   autoResize();
   inputEl.disabled = true;
@@ -540,73 +636,110 @@ function sendMessage(prompt) {
   stopBtn.classList.remove('hidden');
   setStatus('streaming', 'Thinking...');
 
-  // Send to Claude with session context
-  const isFirstMessage = conv.messages.length === 1; // just the user message we added
-  window.claude.sendPrompt(prompt, conv.sessionId, isFirstMessage, state.yolo, conv.projectPath, conv.model ?? null, conv.extraDirs ?? []);
+  const isFirstMessage = conv.messages.length === 1;
+  window.claude.sendPrompt(conv.id, prompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? []);
+  renderConversationList();
 }
 
 function handleThinkingDelta(data) {
-  if (!data || !data.text || !currentAssistantEl) return;
-  state.currentThinkingContent += data.text;
-  let block = currentAssistantEl.querySelector(':scope > .thinking-block');
+  if (!data || !data.convId || !data.text) return;
+  const conv = getConversation(data.convId);
+  if (!conv) return;
+  conv.streamThinking = (conv.streamThinking || '') + data.text;
+
+  if (!isCurrentConv(data.convId)) return;
+  const el = assistantElByConv.get(data.convId);
+  if (!el) return;
+  let block = el.querySelector(':scope > .thinking-block');
   if (!block) {
     block = createThinkingBlock('', true);
-    const body = currentAssistantEl.querySelector('.message-body');
-    currentAssistantEl.insertBefore(block, body);
+    const body = el.querySelector('.message-body');
+    el.insertBefore(block, body);
   }
-  const bodyEl = block.querySelector('.thinking-body');
-  bodyEl.textContent = state.currentThinkingContent;
+  block.querySelector('.thinking-body').textContent = conv.streamThinking;
   setStatus('streaming', 'Thinking...');
   scrollToBottom();
 }
 
 function handleDelta(data) {
-  if (!data.text) return;
-  state.currentStreamContent += data.text;
+  if (!data || !data.convId || !data.text) return;
+  const conv = getConversation(data.convId);
+  if (!conv) return;
+  conv.streamContent = (conv.streamContent || '') + data.text;
 
-  // Throttle re-renders to avoid jank
-  if (!streamThrottleTimer) {
-    streamThrottleTimer = setTimeout(() => {
-      streamThrottleTimer = null;
-      if (currentAssistantEl) {
-        const body = currentAssistantEl.querySelector('.message-body');
-        body.innerHTML = renderMarkdown(state.currentStreamContent);
-        body.classList.add('streaming-cursor');
-        scrollToBottom();
-      }
-    }, 30);
+  if (!isCurrentConv(data.convId)) return;
+  const el = assistantElByConv.get(data.convId);
+  if (!el) return;
+
+  // Throttle re-renders per conversation
+  if (!throttleTimerByConv.has(data.convId)) {
+    throttleTimerByConv.set(data.convId, setTimeout(() => {
+      throttleTimerByConv.delete(data.convId);
+      const conv2 = getConversation(data.convId);
+      const el2 = assistantElByConv.get(data.convId);
+      if (!conv2 || !el2) return;
+      const body = el2.querySelector('.message-body');
+      body.innerHTML = renderMarkdown(conv2.streamContent || '');
+      body.classList.add('streaming-cursor');
+      if (isCurrentConv(data.convId)) scrollToBottom();
+    }, 30));
   }
   setStatus('streaming', 'Generating...');
 }
 
-function handleStreamEnd(data) {
-  state.isStreaming = false;
+function finalizeStream(convId, { save = true } = {}) {
+  const conv = getConversation(convId);
+  if (!conv) return;
+  const el = assistantElByConv.get(convId);
+  const t = throttleTimerByConv.get(convId);
+  if (t) { clearTimeout(t); throttleTimerByConv.delete(convId); }
 
-  // Final render
-  if (currentAssistantEl) {
-    const body = currentAssistantEl.querySelector('.message-body');
-    body.innerHTML = renderMarkdown(state.currentStreamContent);
+  if (el) {
+    const body = el.querySelector('.message-body');
+    if (conv.streamContent) {
+      body.innerHTML = renderMarkdown(conv.streamContent);
+    } else if (!save) {
+      body.innerHTML = '<em style="color:var(--text-muted)">Generation stopped</em>';
+    }
     body.classList.remove('streaming-cursor');
-    const think = currentAssistantEl.querySelector(':scope > .thinking-block');
+    const think = el.querySelector(':scope > .thinking-block');
     if (think) think.classList.remove('expanded');
   }
 
-  // Save assistant message
-  const conv = getCurrentConversation();
-  if (conv) {
-    conv.messages.push({ role: 'assistant', content: state.currentStreamContent, thinking: state.currentThinkingContent });
-    saveState();
+  if (save && (conv.streamContent || conv.streamThinking)) {
+    conv.messages.push({
+      role: 'assistant',
+      content: conv.streamContent || '',
+      thinking: conv.streamThinking || ''
+    });
+  } else if (!save && conv.streamContent) {
+    conv.messages.push({
+      role: 'assistant',
+      content: conv.streamContent,
+      thinking: conv.streamThinking || ''
+    });
   }
 
-  // Update UI
-  currentAssistantEl = null;
-  inputEl.disabled = false;
-  sendBtn.classList.remove('hidden');
-  stopBtn.classList.add('hidden');
-  inputEl.focus();
+  conv.streaming = false;
+  conv.streamContent = '';
+  conv.streamThinking = '';
+  assistantElByConv.delete(convId);
+  saveState();
 
-  // Show cost
-  if (data && data.cost != null) {
+  if (isCurrentConv(convId)) {
+    inputEl.disabled = false;
+    sendBtn.classList.remove('hidden');
+    stopBtn.classList.add('hidden');
+    inputEl.focus();
+  }
+  renderConversationList();
+}
+
+function handleStreamEnd(data) {
+  if (!data || !data.convId) return;
+  finalizeStream(data.convId, { save: true });
+
+  if (data.cost != null && isCurrentConv(data.convId)) {
     const costStr = `$${data.cost.toFixed(4)}`;
     const durationStr = data.duration ? `${(data.duration / 1000).toFixed(1)}s` : '';
     const modelStr = data.model || '';
@@ -614,60 +747,52 @@ function handleStreamEnd(data) {
     costDisplay.textContent = parts.join(' | ');
   }
 
-  setStatus('ready', 'Ready');
+  if (isCurrentConv(data.convId)) setStatus('ready', 'Ready');
 }
 
-function handleStreamError(error) {
-  state.isStreaming = false;
+function handleStreamError(data) {
+  const convId = data && data.convId;
+  const errText = (data && (data.error || data)) || 'Unknown error';
+  if (!convId) return;
+  const conv = getConversation(convId);
+  if (!conv) return;
 
-  // Show error message
-  if (currentAssistantEl) {
-    currentAssistantEl.remove();
+  const el = assistantElByConv.get(convId);
+  if (el) {
+    el.remove();
+    assistantElByConv.delete(convId);
   }
-  messagesEl.appendChild(createMessageEl('error', `Error: ${error}`));
-  scrollToBottom();
+  conv.streaming = false;
+  conv.streamContent = '';
+  conv.streamThinking = '';
 
-  currentAssistantEl = null;
-  inputEl.disabled = false;
-  sendBtn.classList.remove('hidden');
-  stopBtn.classList.add('hidden');
-  inputEl.focus();
-  setStatus('error', 'Error occurred');
+  if (isCurrentConv(convId)) {
+    messagesEl.appendChild(createMessageEl('error', `Error: ${errText}`));
+    scrollToBottom();
+    inputEl.disabled = false;
+    sendBtn.classList.remove('hidden');
+    stopBtn.classList.add('hidden');
+    inputEl.focus();
+    setStatus('error', 'Error occurred');
+  }
+  saveState();
+  renderConversationList();
 }
 
 function handleStreamClose(data) {
-  // If we haven't received a proper end event, finalize
-  if (state.isStreaming) {
-    handleStreamEnd({});
+  const convId = data && data.convId;
+  const conv = convId ? getConversation(convId) : null;
+  if (conv && conv.streaming) {
+    finalizeStream(convId, { save: true });
   }
 }
 
-function stopGeneration() {
-  window.claude.stopGeneration();
-  state.isStreaming = false;
-
-  if (currentAssistantEl) {
-    const body = currentAssistantEl.querySelector('.message-body');
-    if (state.currentStreamContent) {
-      body.innerHTML = renderMarkdown(state.currentStreamContent);
-    } else {
-      body.innerHTML = '<em style="color:var(--text-muted)">Generation stopped</em>';
-    }
-    body.classList.remove('streaming-cursor');
-  }
-
-  const conv = getCurrentConversation();
-  if (conv && state.currentStreamContent) {
-    conv.messages.push({ role: 'assistant', content: state.currentStreamContent, thinking: state.currentThinkingContent });
-    saveState();
-  }
-
-  currentAssistantEl = null;
-  inputEl.disabled = false;
-  sendBtn.classList.remove('hidden');
-  stopBtn.classList.add('hidden');
-  inputEl.focus();
-  setStatus('ready', 'Stopped');
+function stopGeneration(convId) {
+  const target = convId || state.currentConversationId;
+  if (!target) return;
+  window.claude.stopGeneration(target);
+  finalizeStream(target, { save: false });
+  if (isCurrentConv(target)) setStatus('ready', 'Stopped');
 }
 
 // ===== Status =====
@@ -752,13 +877,14 @@ function hidePermissionDialog() {
 
 // ===== Event Listeners =====
 // ===== Workspace Panel =====
-function workspaceRoots() {
-  const conv = getCurrentConversation();
-  if (!conv) return [];
+function workspaceRoots(conv) {
+  const c = conv || getCurrentConversation();
+  if (!c) return [];
   const roots = [];
-  if (conv.projectPath) roots.push(conv.projectPath);
-  if (Array.isArray(conv.extraDirs)) {
-    for (const d of conv.extraDirs) if (d) roots.push(d);
+  const primary = effectiveProjectPath(c);
+  if (primary) roots.push(primary);
+  if (Array.isArray(c.extraDirs)) {
+    for (const d of c.extraDirs) if (d) roots.push(d);
   }
   return roots;
 }
@@ -1183,7 +1309,10 @@ function extractToolFilePath(data) {
 async function handleAgentToolUse(data) {
   const p = extractToolFilePath(data);
   if (!p) return;
-  const roots = workspaceRoots();
+  const convId = data && data.convId;
+  const conv = convId ? getConversation(convId) : getCurrentConversation();
+  if (!conv) return;
+  const roots = workspaceRoots(conv);
   if (roots.length === 0) return;
   try {
     const info = await window.files.pathInfo(roots, p);
@@ -1191,7 +1320,14 @@ async function handleAgentToolUse(data) {
   } catch (e) {
     return;
   }
-  openFile(p, { pulse: true });
+  if (isCurrentConv(conv.id)) {
+    openFile(p, { pulse: true });
+  } else {
+    // Background chat: remember the file for when user switches back
+    ensureWsState(conv);
+    if (!conv.openFiles.includes(p)) conv.openFiles.push(p);
+    saveState();
+  }
 }
 
 // ===== Terminal =====
@@ -1209,7 +1345,8 @@ function applyTerminalHeight() {
 }
 
 function updateTerminalLabel(conv) {
-  const suffix = conv && conv.projectPath ? ` — ${basename(conv.projectPath)}` : '';
+  const p = effectiveProjectPath(conv);
+  const suffix = p ? ` — ${basename(p)}` : '';
   terminalLabel.textContent = `Terminal${suffix}`;
 }
 
@@ -1272,7 +1409,7 @@ function mountTerminal() {
   const rows = entry.term.rows;
   window.terminal.open({
     sessionId: conv.id,
-    cwd: conv.projectPath || null,
+    cwd: effectiveProjectPath(conv) || null,
     cols,
     rows,
   });
@@ -1376,6 +1513,118 @@ function setupTerminalAutoFit() {
   const ro = new ResizeObserver(() => scheduleTerminalFit());
   ro.observe(terminalBody);
   window.addEventListener('resize', scheduleTerminalFit);
+}
+
+// ===== Inline Prompt Dialog (Electron has no window.prompt) =====
+function promptInline(title, description, defaultValue = '') {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('prompt-overlay');
+    const titleEl = document.getElementById('prompt-title');
+    const descEl = document.getElementById('prompt-description');
+    const field = document.getElementById('prompt-input-field');
+    const okBtn = document.getElementById('prompt-ok');
+    const cancelBtn = document.getElementById('prompt-cancel');
+
+    titleEl.textContent = title;
+    descEl.textContent = description || '';
+    descEl.style.display = description ? '' : 'none';
+    field.value = defaultValue;
+    overlay.classList.remove('hidden');
+    setTimeout(() => { field.focus(); field.select(); }, 0);
+
+    const cleanup = () => {
+      overlay.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      field.removeEventListener('keydown', onKey);
+    };
+    const onOk = () => { const v = field.value; cleanup(); resolve(v || null); };
+    const onCancel = () => { cleanup(); resolve(null); };
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+      else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    field.addEventListener('keydown', onKey);
+  });
+}
+
+// ===== Worktree =====
+function restartTerminalForConv(convId) {
+  window.terminal.kill(convId);
+  const entry = xtermByConv.get(convId);
+  if (entry) {
+    try { entry.term.dispose(); } catch (e) {}
+    xtermByConv.delete(convId);
+  }
+  if (state.terminalOpen && currentTerminalConvId === convId) {
+    currentTerminalConvId = null;
+    mountTerminal();
+  }
+}
+
+async function toggleWorktree() {
+  const conv = getCurrentConversation();
+  if (!conv || !conv.projectPath) return;
+
+  if (conv.worktreePath) {
+    // Removing
+    let force = false;
+    try {
+      const st = await window.worktree.status(conv.worktreePath);
+      if (st.dirty || st.unpushed) {
+        const parts = [];
+        if (st.dirty) parts.push('uncommitted changes');
+        if (st.unpushed) parts.push('unpushed commits');
+        const ok = confirm(`Worktree has ${parts.join(' and ')}. Remove anyway?`);
+        if (!ok) return;
+        force = true;
+      }
+    } catch (e) {
+      // Status failed (e.g., worktree already gone on disk). Force remove.
+      force = true;
+    }
+    try {
+      await window.worktree.remove(conv.worktreePath, force || true);
+    } catch (e) {
+      alert('Failed to remove worktree: ' + (e.message || e));
+      return;
+    }
+    conv.worktreePath = null;
+    conv.worktreeBranch = null;
+    saveState();
+    renderProjectPill();
+    refreshBranch();
+    renderWsTabs();
+    renderWsTree();
+    renderConversationList();
+    restartTerminalForConv(conv.id);
+    return;
+  }
+
+  // Adding
+  const suggestion = `claude/${conv.id.slice(0, 8)}`;
+  const branch = await promptInline(
+    'New git worktree',
+    `Creates a new branch from ${basename(conv.projectPath)} and isolates this chat in it.`,
+    suggestion
+  );
+  if (!branch || !branch.trim()) return;
+  try {
+    const res = await window.worktree.add(conv.projectPath, conv.id, branch.trim());
+    conv.worktreePath = res.worktreePath;
+    conv.worktreeBranch = res.branch;
+    saveState();
+    renderProjectPill();
+    refreshBranch();
+    renderWsTabs();
+    renderWsTree();
+    renderConversationList();
+    restartTerminalForConv(conv.id);
+  } catch (e) {
+    alert('Failed to create worktree: ' + (e.message || e));
+  }
 }
 
 // ===== Sidebar Tabs / Memories =====
@@ -1513,6 +1762,7 @@ function init() {
   window.terminal.onExit(onTerminalExit);
 
   branchPill.addEventListener('click', refreshBranch);
+  if (worktreeBtn) worktreeBtn.addEventListener('click', toggleWorktree);
   window.git.onBranchChanged(({ cwd, branch }) => {
     const conv = getCurrentConversation();
     if (!conv || conv.projectPath !== cwd) return;
@@ -1550,20 +1800,25 @@ function init() {
 
   window.claude.onPermissionRequest((data) => {
     currentPermissionData = data;
+    // If the permission is from a different chat, switch to it so the user has context
+    if (data.convId && data.convId !== state.currentConversationId && getConversation(data.convId)) {
+      switchConversation(data.convId);
+    }
     showPermissionDialog(data);
     setStatus('streaming', 'Waiting for approval...');
   });
 
   permAllowBtn.addEventListener('click', () => {
-    // Allow: pass back the original input as updatedInput
-    window.claude.respondPermission({ updatedInput: currentPermissionData?.input || {} });
+    const tid = currentPermissionData?.toolUseId;
+    window.claude.respondPermission(tid, { updatedInput: currentPermissionData?.input || {} });
     currentPermissionData = null;
     hidePermissionDialog();
     setStatus('streaming', 'Generating...');
   });
 
   permDenyBtn.addEventListener('click', () => {
-    window.claude.respondPermission({ behavior: 'deny', message: 'User denied permission' });
+    const tid = currentPermissionData?.toolUseId;
+    window.claude.respondPermission(tid, { behavior: 'deny', message: 'User denied permission' });
     currentPermissionData = null;
     hidePermissionDialog();
     setStatus('streaming', 'Generating...');
@@ -1580,7 +1835,7 @@ function init() {
 
   // Buttons
   sendBtn.addEventListener('click', () => sendMessage(inputEl.value));
-  stopBtn.addEventListener('click', stopGeneration);
+  stopBtn.addEventListener('click', () => stopGeneration());
   newChatBtn.addEventListener('click', newChat);
 
   // Sidebar toggle
@@ -1666,9 +1921,8 @@ function init() {
   // Save memory
   const saveMemoryBtn = document.getElementById('btn-save-memory');
   saveMemoryBtn.addEventListener('click', () => {
-    if (state.isStreaming) return;
     const conv = getCurrentConversation();
-    if (!conv || conv.messages.length === 0) return;
+    if (!conv || conv.messages.length === 0 || conv.streaming) return;
     const prompt =
       "Save the most important takeaways from our conversation as a memory by calling the `remember` tool on the `context` MCP server. " +
       "Write a concise, self-contained summary (what was discussed, what was decided, any facts or preferences worth recalling in future chats). " +
@@ -1715,9 +1969,10 @@ function init() {
       e.preventDefault();
       newChat();
     }
-    // Escape: Stop generation
-    if (e.key === 'Escape' && state.isStreaming) {
-      stopGeneration();
+    // Escape: Stop generation for the current chat
+    if (e.key === 'Escape') {
+      const conv = getCurrentConversation();
+      if (conv && conv.streaming) stopGeneration(conv.id);
     }
     // Ctrl+B: Toggle sidebar
     if (e.ctrlKey && !e.shiftKey && e.key === 'b') {

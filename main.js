@@ -11,10 +11,10 @@ const pty = require('node-pty');
 const terminals = new Map(); // sessionId -> { pty, webContents }
 
 let mainWindow;
-let currentProcess = null;
+const claudeProcesses = new Map(); // convId -> child
 let permissionServer = null;
 let permissionPort = null;
-let pendingPermission = null;
+const pendingPermissions = new Map(); // toolUseId -> res
 let mcpConfigPath = null;
 let contextDb = null;
 
@@ -126,11 +126,13 @@ function startPermissionServer() {
       if (req.url === '/permission') {
         try {
           const data = await readJson(req);
-          pendingPermission = res;
+          const toolUseId = data.tool_use_id || `tuid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          pendingPermissions.set(toolUseId, res);
           mainWindow.webContents.send('permission:request', {
             toolName: data.tool_name || 'Unknown',
             input: data.input || {},
-            toolUseId: data.tool_use_id || ''
+            toolUseId,
+            convId: data.conv_id || null,
           });
         } catch (e) {
           writeJson(res, 400, { behavior: 'deny', reason: 'Bad request' });
@@ -161,11 +163,13 @@ function startPermissionServer() {
 }
 
 // Handle permission response from renderer
-ipcMain.on('permission:response', (_, decision) => {
-  if (pendingPermission) {
-    pendingPermission.writeHead(200, { 'Content-Type': 'application/json' });
-    pendingPermission.end(JSON.stringify(decision));
-    pendingPermission = null;
+ipcMain.on('permission:response', (_, payload) => {
+  const { toolUseId, decision } = payload || {};
+  const res = toolUseId ? pendingPermissions.get(toolUseId) : null;
+  if (res) {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(decision));
+    pendingPermissions.delete(toolUseId);
   }
 });
 
@@ -344,7 +348,10 @@ function writeMcpConfig() {
 }
 
 function cleanup() {
-  if (currentProcess) currentProcess.kill('SIGTERM');
+  for (const child of claudeProcesses.values()) {
+    try { child.kill('SIGTERM'); } catch (e) {}
+  }
+  claudeProcesses.clear();
   if (permissionServer) permissionServer.close();
   if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch (e) {}
   if (contextDb) try { contextDb.close(); } catch (e) {}
@@ -544,6 +551,94 @@ ipcMain.on('git:unwatch', (_, { cwd }) => {
   }
 });
 
+// ===== Git Worktree =====
+const WORKTREES_ROOT = path.join(os.homedir(), '.claude-code-gui', 'worktrees');
+
+function runGit(args, cwd) {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd, timeout: 15000 }, (err, stdout, stderr) => {
+      if (err) {
+        err.stderr = stderr;
+        err.stdout = stdout;
+        return reject(err);
+      }
+      resolve({ stdout: stdout || '', stderr: stderr || '' });
+    });
+  });
+}
+
+async function isGitRepo(cwd) {
+  if (!cwd || !fs.existsSync(cwd)) return false;
+  try {
+    await runGit(['-C', cwd, 'rev-parse', '--git-dir'], cwd);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function worktreeStatus(worktreePath) {
+  if (!worktreePath || !fs.existsSync(worktreePath)) {
+    return { exists: false, dirty: false, unpushed: false };
+  }
+  let dirty = false, unpushed = false;
+  try {
+    const { stdout } = await runGit(['-C', worktreePath, 'status', '--porcelain'], worktreePath);
+    dirty = stdout.trim().length > 0;
+  } catch (e) {}
+  try {
+    const { stdout } = await runGit(['-C', worktreePath, 'log', '@{u}..', '--oneline'], worktreePath);
+    unpushed = stdout.trim().length > 0;
+  } catch (e) {
+    unpushed = false; // no upstream is fine, but unpushed commits on a branch with no upstream still exist — check against main ref
+    try {
+      const { stdout } = await runGit(['-C', worktreePath, 'rev-list', '--count', 'HEAD', '^origin/HEAD'], worktreePath);
+      unpushed = parseInt(stdout.trim(), 10) > 0;
+    } catch (e2) {
+      // no origin/HEAD; treat as "has commits, no remote" — be conservative and say unpushed if there are any commits beyond the fork point
+      unpushed = false;
+    }
+  }
+  return { exists: true, dirty, unpushed };
+}
+
+ipcMain.handle('worktree:add', async (_, { projectPath, convId, branch }) => {
+  if (!projectPath || !convId || !branch) throw new Error('projectPath, convId, branch required');
+  if (!(await isGitRepo(projectPath))) throw new Error('Not a git repository');
+  const safeBranch = String(branch).trim();
+  if (!safeBranch || /[\s~^:?*\[\\]/.test(safeBranch)) throw new Error('Invalid branch name');
+  const worktreePath = path.join(WORKTREES_ROOT, convId);
+  try { fs.mkdirSync(path.dirname(worktreePath), { recursive: true }); } catch (e) {}
+  if (fs.existsSync(worktreePath)) throw new Error('Worktree path already exists: ' + worktreePath);
+  try {
+    await runGit(['-C', projectPath, 'worktree', 'add', worktreePath, '-b', safeBranch], projectPath);
+  } catch (e) {
+    const msg = (e.stderr || e.message || '').toString().trim();
+    throw new Error(msg || 'git worktree add failed');
+  }
+  return { worktreePath, branch: safeBranch };
+});
+
+ipcMain.handle('worktree:status', async (_, { worktreePath }) => {
+  return worktreeStatus(worktreePath);
+});
+
+ipcMain.handle('worktree:remove', async (_, { worktreePath, force }) => {
+  if (!worktreePath) throw new Error('worktreePath required');
+  if (!force) {
+    const st = await worktreeStatus(worktreePath);
+    if (st.dirty || st.unpushed) throw new Error('Worktree has uncommitted or unpushed changes');
+  }
+  try {
+    await runGit(['worktree', 'remove', worktreePath, '--force'], worktreePath);
+  } catch (e) {
+    // Fallback: prune + rmdir if the git metadata is broken
+    try { await runGit(['worktree', 'prune'], os.homedir()); } catch (e2) {}
+    try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch (e2) {}
+  }
+  return { removed: !fs.existsSync(worktreePath) };
+});
+
 // ===== Terminal (PTY) =====
 ipcMain.on('terminal:open', (event, { sessionId, cwd, cols, rows }) => {
   if (!sessionId) return;
@@ -604,11 +699,13 @@ ipcMain.handle('terminal:exists', async (_, { sessionId }) => terminals.has(sess
 
 // ===== Claude CLI Integration =====
 ipcMain.on('claude:send-prompt', (event, data) => {
-  const { prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs } = data;
+  const { convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs } = data;
+  if (!convId) return;
 
-  if (currentProcess) {
-    currentProcess.kill('SIGTERM');
-    currentProcess = null;
+  const existing = claudeProcesses.get(convId);
+  if (existing) {
+    try { existing.kill('SIGTERM'); } catch (e) {}
+    claudeProcesses.delete(convId);
   }
 
   const claudeBin = findClaudeBinary();
@@ -650,6 +747,7 @@ ipcMain.on('claude:send-prompt', (event, data) => {
     cwd,
     env: {
       ...process.env,
+      CLAUDE_GUI_CONV_ID: convId,
       PATH: [
         process.env.PATH,
         path.join(os.homedir(), '.local', 'bin'),
@@ -659,7 +757,7 @@ ipcMain.on('claude:send-prompt', (event, data) => {
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
-  currentProcess = child;
+  claudeProcesses.set(convId, child);
 
   child.stdin.write(prompt);
   child.stdin.end();
@@ -675,7 +773,7 @@ ipcMain.on('claude:send-prompt', (event, data) => {
       if (!line.trim()) continue;
       try {
         const obj = JSON.parse(line);
-        processStreamEvent(event, obj);
+        processStreamEvent(event, convId, obj);
       } catch (e) {
         // Skip malformed JSON
       }
@@ -685,38 +783,39 @@ ipcMain.on('claude:send-prompt', (event, data) => {
   child.stderr.on('data', (data) => {
     const text = data.toString();
     if (text.includes('Error') || text.includes('error')) {
-      event.sender.send('claude:stream-error', text);
+      event.sender.send('claude:stream-error', { convId, error: text });
     }
   });
 
   child.on('close', (code) => {
     if (buffer.trim()) {
       try {
-        processStreamEvent(event, JSON.parse(buffer));
+        processStreamEvent(event, convId, JSON.parse(buffer));
       } catch (e) {}
     }
-    currentProcess = null;
-    event.sender.send('claude:stream-close', { code });
+    if (claudeProcesses.get(convId) === child) claudeProcesses.delete(convId);
+    event.sender.send('claude:stream-close', { convId, code });
   });
 
   child.on('error', (err) => {
-    currentProcess = null;
-    event.sender.send('claude:stream-error', err.message);
+    if (claudeProcesses.get(convId) === child) claudeProcesses.delete(convId);
+    event.sender.send('claude:stream-error', { convId, error: err.message });
   });
 });
 
-function processStreamEvent(event, obj) {
+function processStreamEvent(event, convId, obj) {
   if (obj.type === 'assistant' && obj.message) {
     const content = obj.message.content || [];
     for (const block of content) {
       if (block.type === 'text' && block.text) {
-        event.sender.send('claude:stream-delta', { text: block.text });
+        event.sender.send('claude:stream-delta', { convId, text: block.text });
       }
       if (block.type === 'thinking' && block.thinking) {
-        event.sender.send('claude:thinking-delta', { text: block.thinking });
+        event.sender.send('claude:thinking-delta', { convId, text: block.thinking });
       }
       if (block.type === 'tool_use') {
         event.sender.send('claude:tool-use', {
+          convId,
           name: block.name,
           input: block.input
         });
@@ -724,6 +823,7 @@ function processStreamEvent(event, obj) {
     }
   } else if (obj.type === 'result') {
     event.sender.send('claude:stream-end', {
+      convId,
       result: obj.result,
       cost: obj.total_cost_usd,
       duration: obj.duration_ms,
@@ -732,10 +832,13 @@ function processStreamEvent(event, obj) {
   }
 }
 
-ipcMain.on('claude:stop-generation', () => {
-  if (currentProcess) {
-    currentProcess.kill('SIGTERM');
-    currentProcess = null;
+ipcMain.on('claude:stop-generation', (_, payload) => {
+  const convId = (payload && payload.convId) || null;
+  if (!convId) return;
+  const child = claudeProcesses.get(convId);
+  if (child) {
+    try { child.kill('SIGTERM'); } catch (e) {}
+    claudeProcesses.delete(convId);
   }
 });
 
