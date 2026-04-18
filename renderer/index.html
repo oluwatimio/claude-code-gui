@@ -25,6 +25,16 @@
           <line x1="10" y1="3" x2="10" y2="13" stroke="currentColor" stroke-width="1.2"/>
         </svg>
       </button>
+      <button id="btn-toggle-pr" class="titlebar-btn titlebar-btn-sidebar" title="Toggle PRs Panel (Ctrl+Shift+P)">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <circle cx="4" cy="4" r="1.6" stroke="currentColor" stroke-width="1.2"/>
+          <circle cx="4" cy="12" r="1.6" stroke="currentColor" stroke-width="1.2"/>
+          <circle cx="12" cy="12" r="1.6" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M4 5.6v4.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <path d="M12 10.4V6a2 2 0 0 0-2-2H7.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+          <path d="M9 2.5L7 4l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <button id="btn-toggle-sidebar" class="titlebar-btn titlebar-btn-sidebar" title="Toggle Sidebar (Ctrl+B)">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
           <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -228,6 +238,38 @@
       </div>
       <div class="ws-vsplitter" id="ws-vsplitter" title="Drag to resize"></div>
       <div class="ws-tiles" id="ws-tiles"></div>
+    </aside>
+
+    <!-- PR Panel -->
+    <aside id="pr-panel" class="collapsed">
+      <div class="side-resize side-resize-left" id="pr-resize" title="Drag to resize"></div>
+      <div id="pr-header">
+        <div id="pr-title-row">
+          <button id="pr-back-btn" class="hidden" title="Back to list">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+          </button>
+          <div id="pr-header-label">Pull Requests</div>
+          <div id="pr-header-spacer"></div>
+          <button id="pr-refresh-btn" title="Refresh">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+            </svg>
+          </button>
+        </div>
+        <div id="pr-repo-label"></div>
+        <div id="pr-filter-row">
+          <button class="pr-filter-btn active" data-filter="mine">My PRs</button>
+          <button class="pr-filter-btn" data-filter="all">All open</button>
+        </div>
+      </div>
+      <div id="pr-body">
+        <div id="pr-list" class="pr-view"></div>
+        <div id="pr-detail" class="pr-view hidden"></div>
+      </div>
     </aside>
   </div>
 

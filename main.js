@@ -408,6 +408,147 @@ ipcMain.handle('files:pick-attachments', async () => {
   return result.filePaths;
 });
 
+// ===== gh CLI integration =====
+let _ghBinary = null;
+function findGhBinary() {
+  if (_ghBinary) return _ghBinary;
+  const candidates = [
+    '/opt/homebrew/bin/gh',
+    '/usr/local/bin/gh',
+    '/usr/bin/gh',
+    path.join(os.homedir(), '.local', 'bin', 'gh'),
+  ];
+  for (const c of candidates) {
+    try { fs.accessSync(c, fs.constants.X_OK); _ghBinary = c; return c; } catch (e) {}
+  }
+  try {
+    const { execSync } = require('child_process');
+    const result = execSync('bash -lc "which gh"', { encoding: 'utf8', timeout: 3000 }).trim();
+    if (result) { _ghBinary = result; return result; }
+  } catch (e) {}
+  _ghBinary = 'gh';
+  return _ghBinary;
+}
+
+function runGh(args, { cwd, stdin } = {}) {
+  return new Promise((resolve) => {
+    const bin = findGhBinary();
+    const child = spawn(bin, args, {
+      cwd: cwd || undefined,
+      env: { ...process.env, GH_PROMPT_DISABLED: '1' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => {
+      resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message });
+    });
+    child.on('close', (code) => {
+      resolve({ code: code ?? -1, stdout, stderr });
+    });
+    if (stdin) {
+      try { child.stdin.write(stdin); child.stdin.end(); } catch (e) {}
+    } else {
+      try { child.stdin.end(); } catch (e) {}
+    }
+  });
+}
+
+function parseJsonSafe(text) {
+  try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+ipcMain.handle('gh:auth-status', async () => {
+  const { code, stderr } = await runGh(['auth', 'status']);
+  return { ok: code === 0, message: stderr.trim() };
+});
+
+// Returns { owner, name, defaultBranch, url } for the repo at `cwd`, or null.
+ipcMain.handle('gh:repo-info', async (_, cwd) => {
+  if (!cwd) return null;
+  const { code, stdout } = await runGh(
+    ['repo', 'view', '--json', 'owner,name,defaultBranchRef,url'],
+    { cwd },
+  );
+  if (code !== 0) return null;
+  const data = parseJsonSafe(stdout);
+  if (!data) return null;
+  return {
+    owner: data.owner && data.owner.login,
+    name: data.name,
+    defaultBranch: data.defaultBranchRef && data.defaultBranchRef.name,
+    url: data.url,
+  };
+});
+
+// List the current user's open PRs in the repo at `cwd`.
+ipcMain.handle('gh:pr-list', async (_, { cwd, filter } = {}) => {
+  if (!cwd) return { ok: false, error: 'No project selected' };
+  const args = [
+    'pr', 'list',
+    '--state', 'open',
+    '--json', 'number,title,author,isDraft,url,updatedAt,headRefName,baseRefName,reviewDecision',
+    '--limit', '50',
+  ];
+  if (filter === 'mine' || !filter) args.push('--author', '@me');
+  const { code, stdout, stderr } = await runGh(args, { cwd });
+  if (code !== 0) return { ok: false, error: stderr.trim() || 'gh pr list failed' };
+  const data = parseJsonSafe(stdout) || [];
+  return { ok: true, prs: data };
+});
+
+// Detail view: PR body + inline review comments + issue (top-level) comments + review summaries.
+ipcMain.handle('gh:pr-detail', async (_, { cwd, number } = {}) => {
+  if (!cwd || !number) return { ok: false, error: 'Missing cwd or PR number' };
+  const viewArgs = [
+    'pr', 'view', String(number),
+    '--json', 'number,title,body,author,state,isDraft,url,baseRefName,headRefName,reviewDecision,updatedAt,createdAt',
+  ];
+  const [view, reviewComments, issueComments, reviews] = await Promise.all([
+    runGh(viewArgs, { cwd }),
+    runGh(['api', `repos/{owner}/{repo}/pulls/${number}/comments`, '--paginate'], { cwd }),
+    runGh(['api', `repos/{owner}/{repo}/issues/${number}/comments`, '--paginate'], { cwd }),
+    runGh(['api', `repos/{owner}/{repo}/pulls/${number}/reviews`, '--paginate'], { cwd }),
+  ]);
+  if (view.code !== 0) return { ok: false, error: view.stderr.trim() || 'gh pr view failed' };
+  const pr = parseJsonSafe(view.stdout);
+  if (!pr) return { ok: false, error: 'Unable to parse PR' };
+  const reviewCommentsData = parseJsonSafe(reviewComments.stdout) || [];
+  const issueCommentsData = parseJsonSafe(issueComments.stdout) || [];
+  const reviewsData = parseJsonSafe(reviews.stdout) || [];
+  return { ok: true, pr, reviewComments: reviewCommentsData, issueComments: issueCommentsData, reviews: reviewsData };
+});
+
+// Post a top-level PR comment (issue comment).
+ipcMain.handle('gh:pr-comment', async (_, { cwd, number, body } = {}) => {
+  if (!cwd || !number || !body) return { ok: false, error: 'Missing cwd, PR number, or body' };
+  const { code, stderr, stdout } = await runGh(
+    ['api', '--method', 'POST', `repos/{owner}/{repo}/issues/${number}/comments`, '-f', `body=${body}`],
+    { cwd },
+  );
+  if (code !== 0) return { ok: false, error: stderr.trim() || 'gh api failed' };
+  return { ok: true, comment: parseJsonSafe(stdout) };
+});
+
+// Reply to an inline review thread (in_reply_to = review comment id).
+ipcMain.handle('gh:pr-reply-review', async (_, { cwd, number, inReplyTo, body } = {}) => {
+  if (!cwd || !number || !inReplyTo || !body) {
+    return { ok: false, error: 'Missing cwd, PR number, inReplyTo, or body' };
+  }
+  const { code, stderr, stdout } = await runGh(
+    [
+      'api', '--method', 'POST',
+      `repos/{owner}/{repo}/pulls/${number}/comments`,
+      '-F', `in_reply_to=${inReplyTo}`,
+      '-f', `body=${body}`,
+    ],
+    { cwd },
+  );
+  if (code !== 0) return { ok: false, error: stderr.trim() || 'gh api failed' };
+  return { ok: true, comment: parseJsonSafe(stdout) };
+});
+
 // ===== Filesystem IPC (workspace panel) =====
 const SKIP_DIR_NAMES = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
