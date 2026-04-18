@@ -781,8 +781,9 @@ ipcMain.on('claude:send-prompt', (event, data) => {
   });
 
   child.stderr.on('data', (data) => {
-    const text = data.toString();
-    if (text.includes('Error') || text.includes('error')) {
+    const text = data.toString().trim();
+    if (!text) return;
+    if (text.includes('Error') || text.includes('error') || text.includes('fatal') || text.includes('not found') || text.includes('ENOENT') || text.includes('failed')) {
       event.sender.send('claude:stream-error', { convId, error: text });
     }
   });

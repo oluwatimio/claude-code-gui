@@ -783,7 +783,11 @@ function handleStreamClose(data) {
   const convId = data && data.convId;
   const conv = convId ? getConversation(convId) : null;
   if (conv && conv.streaming) {
+    const hadContent = !!(conv.streamContent || conv.streamThinking);
     finalizeStream(convId, { save: true });
+    if (isCurrentConv(convId)) {
+      setStatus(hadContent ? 'ready' : 'error', hadContent ? 'Ready' : 'No response received');
+    }
   }
 }
 
@@ -1550,6 +1554,41 @@ function promptInline(title, description, defaultValue = '') {
   });
 }
 
+// ===== Inline Confirm Dialog =====
+function confirmInline(title, description, { okLabel = 'Continue', cancelLabel = 'Cancel' } = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById('confirm-overlay');
+    const titleEl = document.getElementById('confirm-title');
+    const descEl = document.getElementById('confirm-description');
+    const okBtn = document.getElementById('confirm-ok');
+    const cancelBtn = document.getElementById('confirm-cancel');
+
+    titleEl.textContent = title;
+    descEl.textContent = description || '';
+    descEl.style.display = description ? '' : 'none';
+    okBtn.textContent = okLabel;
+    cancelBtn.textContent = cancelLabel;
+    overlay.classList.remove('hidden');
+    setTimeout(() => { okBtn.focus(); }, 0);
+
+    const cleanup = () => {
+      overlay.classList.add('hidden');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      document.removeEventListener('keydown', onKey);
+    };
+    const onOk = () => { cleanup(); resolve(true); };
+    const onCancel = () => { cleanup(); resolve(false); };
+    const onKey = (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); onOk(); }
+      else if (e.key === 'Escape') { e.preventDefault(); onCancel(); }
+    };
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    document.addEventListener('keydown', onKey);
+  });
+}
+
 // ===== Worktree =====
 function restartTerminalForConv(convId) {
   window.terminal.kill(convId);
@@ -1593,6 +1632,7 @@ async function toggleWorktree() {
     }
     conv.worktreePath = null;
     conv.worktreeBranch = null;
+    conv.sessionId = generateUUID();
     saveState();
     renderProjectPill();
     refreshBranch();
@@ -1604,6 +1644,15 @@ async function toggleWorktree() {
   }
 
   // Adding
+  const hasHistory = Array.isArray(conv.messages) && conv.messages.length > 0;
+  if (hasHistory) {
+    const ok = await confirmInline(
+      'Enable worktree for this chat?',
+      `This chat already has messages. Enabling a worktree switches Claude to a new project context, so Claude will start fresh and won't have access to the prior turns in this conversation.\n\nYour existing messages will still be visible in the UI.`,
+      { okLabel: 'Enable worktree', cancelLabel: 'Cancel' }
+    );
+    if (!ok) return;
+  }
   const suggestion = `claude/${conv.id.slice(0, 8)}`;
   const branch = await promptInline(
     'New git worktree',
@@ -1615,6 +1664,7 @@ async function toggleWorktree() {
     const res = await window.worktree.add(conv.projectPath, conv.id, branch.trim());
     conv.worktreePath = res.worktreePath;
     conv.worktreeBranch = res.branch;
+    conv.sessionId = generateUUID();
     saveState();
     renderProjectPill();
     refreshBranch();

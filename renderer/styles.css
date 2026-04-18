@@ -1297,7 +1297,7 @@ html, body {
 }
 
 /* ===== Permission Dialog ===== */
-#permission-overlay, #prompt-overlay {
+#permission-overlay, #prompt-overlay, #confirm-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.7);
@@ -1309,7 +1309,7 @@ html, body {
   animation: fadeIn 0.15s ease-out;
 }
 
-#prompt-dialog {
+#prompt-dialog, #confirm-dialog {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1319,10 +1319,13 @@ html, body {
   animation: dialogEnter 0.2s ease-out;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
 }
-#prompt-dialog h3 {
+#prompt-dialog h3, #confirm-dialog h3 {
   margin: 0 0 8px;
   font-size: 15px;
   color: var(--text-primary);
+}
+#confirm-description {
+  white-space: pre-wrap;
 }
 .prompt-description {
   margin: 0 0 14px;
