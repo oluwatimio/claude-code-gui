@@ -718,6 +718,82 @@ html, body {
   display: block;
 }
 
+/* Files accessed block (assistant turns) */
+.files-accessed-block {
+  margin: 8px 0 2px 36px;
+  border-left: 2px solid var(--border-color, rgba(255,255,255,0.08));
+  padding-left: 10px;
+}
+
+.files-accessed-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  color: var(--text-muted, #8a8a8a);
+  font-size: 12px;
+  cursor: pointer;
+}
+.files-accessed-toggle:hover {
+  color: var(--text-secondary, #b0b0b0);
+}
+
+.files-accessed-chevron {
+  transition: transform 0.15s ease;
+  transform: rotate(-90deg);
+}
+.files-accessed-block.expanded .files-accessed-chevron {
+  transform: rotate(0deg);
+}
+
+.files-accessed-body {
+  display: none;
+  margin-top: 6px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.files-accessed-block.expanded .files-accessed-body {
+  display: flex;
+}
+
+.file-access-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  max-width: 280px;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+.file-access-chip:hover {
+  background: var(--bg-elevated);
+  border-color: #2a2a2a;
+  color: var(--text-primary);
+}
+.file-access-chip .file-access-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-access-chip.file-access-read svg {
+  color: var(--text-muted);
+}
+.file-access-chip.file-access-write {
+  border-color: rgba(0, 210, 106, 0.35);
+  color: var(--text-primary);
+}
+.file-access-chip.file-access-write svg {
+  color: var(--accent);
+}
+
 .message-body p {
   margin-bottom: 12px;
 }
@@ -892,7 +968,7 @@ html, body {
 
 /* Streaming cursor */
 .streaming-cursor::after {
-  content: '\u2588';
+  content: '█';
   animation: blink 1s step-end infinite;
   color: var(--accent);
   font-weight: 300;
@@ -1123,7 +1199,148 @@ html, body {
   line-height: 1.6;
   resize: none;
   max-height: 200px;
-  padding: 16px 60px 16px 22px;
+  padding: 16px 96px 16px 22px;
+}
+
+#attachments-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 14px 0;
+}
+#attachments-list.hidden { display: none; }
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  max-width: 220px;
+}
+.attachment-chip .attachment-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.attachment-chip-image {
+  padding-left: 3px;
+}
+.attachment-chip .attachment-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--bg-primary);
+  flex-shrink: 0;
+  display: block;
+}
+
+/* In-message attachment previews (user bubbles) */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.message-attachments:empty { display: none; }
+
+.message-attachment-image {
+  display: block;
+  max-width: 240px;
+  max-height: 180px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  cursor: zoom-in;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+.message-attachment-image:hover {
+  border-color: #2a2a2a;
+  transform: translateY(-1px);
+}
+.message-attachment-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+}
+
+.message-attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  max-width: 280px;
+}
+.message-attachment-file svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+.message-attachment-file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip .attachment-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip .attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: 50%;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.attachment-chip .attachment-remove:hover {
+  background: rgba(255, 68, 68, 0.15);
+  color: var(--error-red);
+}
+
+#attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+#attach-btn:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+#attach-btn:active {
+  transform: scale(0.95);
+}
+#attach-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 #prompt-input::placeholder {

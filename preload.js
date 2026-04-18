@@ -111,6 +111,7 @@ contextBridge.exposeInMainWorld('files', {
   listDir: (roots, dirPath) => ipcRenderer.invoke('fs:list-dir', roots, dirPath),
   readFile: (roots, filePath) => ipcRenderer.invoke('fs:read-file', roots, filePath),
   pathInfo: (roots, p) => ipcRenderer.invoke('fs:path-info', roots, p),
+  pickAttachments: () => ipcRenderer.invoke('files:pick-attachments'),
 });
 
 contextBridge.exposeInMainWorld('memory', {

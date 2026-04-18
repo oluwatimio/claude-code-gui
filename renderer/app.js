@@ -9,6 +9,7 @@ const state = {
   workspaceWidth: 480,
   terminalOpen: false,
   terminalHeight: 240,
+  defaultModel: null, // last model the user picked; used as initial model for new conversations
 };
 
 // Per-conversation DOM + timer refs (not persisted)
@@ -44,6 +45,8 @@ const projectPill = document.getElementById('project-pill');
 const projectLabel = document.getElementById('project-label');
 const extraDirsList = document.getElementById('extra-dirs-list');
 const addDirBtn = document.getElementById('add-dir-btn');
+const attachBtn = document.getElementById('attach-btn');
+const attachmentsListEl = document.getElementById('attachments-list');
 const modelSelector = document.getElementById('model-selector');
 const modelLabel = document.getElementById('model-label');
 const modelMenu = document.getElementById('model-menu');
@@ -160,6 +163,7 @@ function renderProjectPill() {
     projectPill.classList.remove('has-project');
   }
   renderExtraDirs();
+  renderAttachments();
   renderWorktreeBtn();
 }
 
@@ -220,9 +224,67 @@ function renderExtraDirs() {
   }
 }
 
+function renderAttachments() {
+  if (!attachmentsListEl) return;
+  attachmentsListEl.innerHTML = '';
+  const conv = getCurrentConversation();
+  const files = (conv && conv.pendingAttachments) || [];
+  if (!files.length) {
+    attachmentsListEl.classList.add('hidden');
+    return;
+  }
+  attachmentsListEl.classList.remove('hidden');
+  for (const file of files) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip';
+    chip.title = file;
+
+    const ext = (file.split('.').pop() || '').toLowerCase();
+    const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext);
+
+    if (isImage) {
+      chip.classList.add('attachment-chip-image');
+      const thumb = document.createElement('img');
+      thumb.className = 'attachment-thumb';
+      thumb.src = 'file://' + encodeURI(file).replace(/#/g, '%23').replace(/\?/g, '%3F');
+      thumb.alt = '';
+      thumb.draggable = false;
+      chip.appendChild(thumb);
+    } else {
+      const icon = document.createElement('span');
+      icon.className = 'attachment-icon';
+      icon.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+      chip.appendChild(icon);
+    }
+
+    const label = document.createElement('span');
+    label.className = 'attachment-label';
+    label.textContent = basename(file);
+    chip.appendChild(label);
+
+    const remove = document.createElement('button');
+    remove.className = 'attachment-remove';
+    remove.type = 'button';
+    remove.title = 'Remove';
+    remove.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+      <path d="M18 6L6 18M6 6l12 12"/>
+    </svg>`;
+    remove.onclick = () => {
+      const c = getCurrentConversation();
+      if (!c || !c.pendingAttachments) return;
+      c.pendingAttachments = c.pendingAttachments.filter(f => f !== file);
+      saveState();
+      renderAttachments();
+    };
+    chip.appendChild(remove);
+
+    attachmentsListEl.appendChild(chip);
+  }
+}
+
 function renderModelSelector() {
   const conv = getCurrentConversation();
-  const current = conv ? (conv.model ?? null) : null;
+  const current = conv ? (conv.model ?? null) : (state.defaultModel ?? null);
   modelLabel.textContent = findModelLabel(current);
   modelSelector.title = current == null
     ? 'Using global default model · click to change'
@@ -231,7 +293,7 @@ function renderModelSelector() {
 
 function buildModelMenu() {
   const conv = getCurrentConversation();
-  const current = conv ? (conv.model ?? null) : null;
+  const current = conv ? (conv.model ?? null) : (state.defaultModel ?? null);
   modelMenu.innerHTML = '';
   for (const entry of MODELS) {
     if (entry.section) {
@@ -255,6 +317,7 @@ function buildModelMenu() {
       let c = getCurrentConversation();
       if (!c) c = createConversation('New Chat');
       c.model = entry.value;
+      state.defaultModel = entry.value;
       saveState();
       renderModelSelector();
       closeModelMenu();
@@ -295,7 +358,99 @@ function createThinkingBlock(text, expanded = false) {
   return wrap;
 }
 
-function createMessageEl(role, content, isStreaming = false, thinking = '') {
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+
+function fileUrl(p) {
+  return 'file://' + encodeURI(p).replace(/#/g, '%23').replace(/\?/g, '%3F');
+}
+
+function createAttachmentsEl(attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return null;
+  const wrap = document.createElement('div');
+  wrap.className = 'message-attachments';
+  for (const p of attachments) {
+    const ext = (p.split('.').pop() || '').toLowerCase();
+    const isImage = IMAGE_EXTS.includes(ext);
+    if (isImage) {
+      const tile = document.createElement('a');
+      tile.className = 'message-attachment-image';
+      tile.href = fileUrl(p);
+      tile.title = p;
+      tile.onclick = (e) => {
+        e.preventDefault();
+        window.shellAPI.openExternal(fileUrl(p));
+      };
+      const img = document.createElement('img');
+      img.src = fileUrl(p);
+      img.alt = basename(p);
+      img.draggable = false;
+      tile.appendChild(img);
+      wrap.appendChild(tile);
+    } else {
+      const tile = document.createElement('div');
+      tile.className = 'message-attachment-file';
+      tile.title = p;
+      tile.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span>${escapeHtml(basename(p))}</span>`;
+      wrap.appendChild(tile);
+    }
+  }
+  return wrap;
+}
+
+function createFilesAccessedBlock(filesAccessed, expanded = false) {
+  const wrap = document.createElement('div');
+  wrap.className = 'files-accessed-block' + (expanded ? ' expanded' : '');
+  wrap.innerHTML = `
+    <button class="files-accessed-toggle" type="button">
+      <svg class="files-accessed-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+      <span class="files-accessed-label"></span>
+    </button>
+    <div class="files-accessed-body"></div>
+  `;
+  wrap.querySelector('.files-accessed-toggle').addEventListener('click', () => {
+    wrap.classList.toggle('expanded');
+  });
+  updateFilesAccessedContents(wrap, filesAccessed || []);
+  return wrap;
+}
+
+function updateFilesAccessedContents(wrap, filesAccessed) {
+  const label = wrap.querySelector('.files-accessed-label');
+  const body = wrap.querySelector('.files-accessed-body');
+  const count = filesAccessed.length;
+  const writeCount = filesAccessed.filter(a => a.kind === 'write').length;
+  label.textContent = writeCount
+    ? `${count} file${count === 1 ? '' : 's'} accessed · ${writeCount} edited`
+    : `${count} file${count === 1 ? '' : 's'} accessed`;
+  body.innerHTML = '';
+  for (const entry of filesAccessed) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'file-access-chip ' + (entry.kind === 'write' ? 'file-access-write' : 'file-access-read');
+    chip.title = entry.path;
+    const icon = entry.kind === 'write'
+      ? `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`
+      : `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    chip.innerHTML = icon + `<span class="file-access-name">${escapeHtml(basename(entry.path))}</span>`;
+    chip.addEventListener('click', () => openFile(entry.path, { pulse: true }));
+    body.appendChild(chip);
+  }
+}
+
+function renderFilesAccessedBlock(msgEl, filesAccessed) {
+  if (!msgEl || !Array.isArray(filesAccessed) || !filesAccessed.length) return;
+  let block = msgEl.querySelector(':scope > .files-accessed-block');
+  if (!block) {
+    block = createFilesAccessedBlock(filesAccessed, false);
+    msgEl.appendChild(block);
+  } else {
+    updateFilesAccessedContents(block, filesAccessed);
+  }
+}
+
+function createMessageEl(role, content, isStreaming = false, thinking = '', attachments = null, filesAccessed = null) {
   const msg = document.createElement('div');
   msg.className = `message message-${role}`;
 
@@ -327,8 +482,18 @@ function createMessageEl(role, content, isStreaming = false, thinking = '') {
   const body = document.createElement('div');
   body.className = 'message-body';
 
+  const attachmentsEl = role === 'user' ? createAttachmentsEl(attachments) : null;
+  if (attachmentsEl) body.appendChild(attachmentsEl);
+
   if (content) {
-    body.innerHTML = role === 'user' ? escapeHtml(content).replace(/\n/g, '<br>') : renderMarkdown(content);
+    if (role === 'user') {
+      const text = document.createElement('div');
+      text.className = 'message-text';
+      text.innerHTML = escapeHtml(content).replace(/\n/g, '<br>');
+      body.appendChild(text);
+    } else {
+      body.innerHTML = renderMarkdown(content);
+    }
   }
 
   if (isStreaming && !content) {
@@ -344,6 +509,9 @@ function createMessageEl(role, content, isStreaming = false, thinking = '') {
     msg.appendChild(createThinkingBlock(thinking, false));
   }
   msg.appendChild(body);
+  if (role === 'assistant' && Array.isArray(filesAccessed) && filesAccessed.length) {
+    msg.appendChild(createFilesAccessedBlock(filesAccessed, false));
+  }
   return msg;
 }
 
@@ -378,6 +546,7 @@ function createConversation(title) {
     worktreePath: null,
     worktreeBranch: null,
     pendingNewSession: false,
+    model: state.defaultModel ?? null,
   };
   state.conversations.unshift(conv);
   state.currentConversationId = conv.id;
@@ -398,12 +567,12 @@ function switchConversation(id) {
   // Re-render messages
   messagesEl.innerHTML = '';
   for (const msg of conv.messages) {
-    messagesEl.appendChild(createMessageEl(msg.role, msg.content, false, msg.thinking || ''));
+    messagesEl.appendChild(createMessageEl(msg.role, msg.content, false, msg.thinking || '', msg.attachments || null, msg.filesAccessed || null));
   }
 
   // If this conversation is streaming, rebuild the live placeholder with accumulated content
   if (conv.streaming) {
-    const el = createMessageEl('assistant', conv.streamContent || '', true, conv.streamThinking || '');
+    const el = createMessageEl('assistant', conv.streamContent || '', true, conv.streamThinking || '', null, conv.streamFilesAccessed || null);
     if (conv.streamThinking) {
       const think = el.querySelector(':scope > .thinking-block');
       if (think) think.classList.add('expanded');
@@ -557,6 +726,7 @@ function saveState() {
       workspaceWidth: state.workspaceWidth,
       terminalOpen: state.terminalOpen,
       terminalHeight: state.terminalHeight,
+      defaultModel: state.defaultModel,
     }));
   } catch (e) {
     // Silently fail on storage quota
@@ -585,12 +755,16 @@ function loadState() {
       if (typeof data.terminalHeight === 'number' && data.terminalHeight >= 120) {
         state.terminalHeight = data.terminalHeight;
       }
+      if (data.defaultModel === null || typeof data.defaultModel === 'string') {
+        state.defaultModel = data.defaultModel;
+      }
 
       // Reset any in-flight stream flags — processes don't survive app restarts
       for (const conv of state.conversations) {
         conv.streaming = false;
         conv.streamContent = '';
         conv.streamThinking = '';
+        conv.streamFilesAccessed = [];
         if (conv.worktreePath === undefined) conv.worktreePath = null;
         if (conv.worktreeBranch === undefined) conv.worktreeBranch = null;
       }
@@ -603,9 +777,11 @@ function loadState() {
 // ===== Streaming Integration (per-conversation) =====
 
 function sendMessage(prompt) {
-  if (!prompt.trim()) return;
-
   let conv = getCurrentConversation();
+  const attachments = (conv && Array.isArray(conv.pendingAttachments)) ? conv.pendingAttachments.slice() : [];
+
+  if (!prompt.trim() && attachments.length === 0) return;
+
   if (!conv) {
     const title = prompt.slice(0, 50) + (prompt.length > 50 ? '...' : '');
     conv = createConversation(title);
@@ -613,17 +789,32 @@ function sendMessage(prompt) {
 
   if (conv.streaming) return; // don't allow concurrent sends within the same conv
 
+  // Build final prompt with @path references so the Claude CLI reads attached files/images.
+  // Paths with spaces are quoted; @ references go first so they're easy to scan in the message bubble.
+  const quoteIfNeeded = (p) => (/\s/.test(p) ? `@"${p}"` : `@${p}`);
+  const attachmentPrefix = attachments.map(quoteIfNeeded).join(' ');
+  const finalPrompt = attachmentPrefix
+    ? (prompt.trim() ? `${attachmentPrefix}\n\n${prompt}` : attachmentPrefix)
+    : prompt;
+
   welcomeEl.classList.add('hidden');
   messagesEl.classList.remove('hidden');
 
-  conv.messages.push({ role: 'user', content: prompt });
-  messagesEl.appendChild(createMessageEl('user', prompt));
+  // Store typed text + attachments separately so we can render previews on reload.
+  // The @path-prefixed finalPrompt goes only to the CLI.
+  const userMessage = { role: 'user', content: prompt };
+  if (attachments.length) userMessage.attachments = attachments;
+  conv.messages.push(userMessage);
+  messagesEl.appendChild(createMessageEl('user', prompt, false, '', attachments));
   scrollToBottom();
+  conv.pendingAttachments = [];
   saveState();
+  renderAttachments();
 
   conv.streaming = true;
   conv.streamContent = '';
   conv.streamThinking = '';
+  conv.streamFilesAccessed = [];
 
   const assistantEl = createMessageEl('assistant', '', true);
   messagesEl.appendChild(assistantEl);
@@ -639,7 +830,7 @@ function sendMessage(prompt) {
 
   const isFirstMessage = sessionLogic.shouldStartFreshSession(conv);
   conv.pendingNewSession = false;
-  window.claude.sendPrompt(conv.id, prompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? []);
+  window.claude.sendPrompt(conv.id, finalPrompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? []);
   renderConversationList();
 }
 
@@ -708,23 +899,29 @@ function finalizeStream(convId, { save = true } = {}) {
     if (think) think.classList.remove('expanded');
   }
 
+  const filesAccessed = Array.isArray(conv.streamFilesAccessed) ? conv.streamFilesAccessed.slice() : [];
   if (save && (conv.streamContent || conv.streamThinking)) {
-    conv.messages.push({
+    const m = {
       role: 'assistant',
       content: conv.streamContent || '',
       thinking: conv.streamThinking || ''
-    });
+    };
+    if (filesAccessed.length) m.filesAccessed = filesAccessed;
+    conv.messages.push(m);
   } else if (!save && conv.streamContent) {
-    conv.messages.push({
+    const m = {
       role: 'assistant',
       content: conv.streamContent,
       thinking: conv.streamThinking || ''
-    });
+    };
+    if (filesAccessed.length) m.filesAccessed = filesAccessed;
+    conv.messages.push(m);
   }
 
   conv.streaming = false;
   conv.streamContent = '';
   conv.streamThinking = '';
+  conv.streamFilesAccessed = [];
   assistantElByConv.delete(convId);
   saveState();
 
@@ -1298,40 +1495,66 @@ function restoreOpenFiles() {
   }
 }
 
-function extractToolFilePath(data) {
+function extractToolFileAccess(data) {
   const i = (data && data.input) || {};
   switch (data && data.name) {
     case 'Read':
+      return i.file_path ? { path: i.file_path, kind: 'read' } : null;
     case 'Edit':
+    case 'MultiEdit':
     case 'Write':
-      return i.file_path || null;
+      return i.file_path ? { path: i.file_path, kind: 'write' } : null;
     case 'NotebookEdit':
-      return i.notebook_path || null;
+      return i.notebook_path ? { path: i.notebook_path, kind: 'write' } : null;
     default:
       return null;
   }
 }
 
+function extractToolFilePath(data) {
+  const access = extractToolFileAccess(data);
+  return access ? access.path : null;
+}
+
+function recordFileAccess(conv, path, kind) {
+  if (!conv || !path) return;
+  if (!Array.isArray(conv.streamFilesAccessed)) conv.streamFilesAccessed = [];
+  const existing = conv.streamFilesAccessed.find(a => a.path === path);
+  if (existing) {
+    // Upgrade read → write if the same file gets edited later in the turn
+    if (kind === 'write') existing.kind = 'write';
+  } else {
+    conv.streamFilesAccessed.push({ path, kind });
+  }
+  if (isCurrentConv(conv.id)) {
+    const el = assistantElByConv.get(conv.id);
+    if (el) renderFilesAccessedBlock(el, conv.streamFilesAccessed);
+  }
+}
+
 async function handleAgentToolUse(data) {
-  const p = extractToolFilePath(data);
-  if (!p) return;
+  const access = extractToolFileAccess(data);
+  if (!access) return;
   const convId = data && data.convId;
   const conv = convId ? getConversation(convId) : getCurrentConversation();
   if (!conv) return;
+
+  recordFileAccess(conv, access.path, access.kind);
+
   const roots = workspaceRoots(conv);
   if (roots.length === 0) return;
   try {
-    const info = await window.files.pathInfo(roots, p);
+    const info = await window.files.pathInfo(roots, access.path);
     if (!info || !info.exists || info.isDir) return;
   } catch (e) {
     return;
   }
   if (isCurrentConv(conv.id)) {
-    openFile(p, { pulse: true });
+    openFile(access.path, { pulse: true });
   } else {
     // Background chat: remember the file for when user switches back
     ensureWsState(conv);
-    if (!conv.openFiles.includes(p)) conv.openFiles.push(p);
+    if (!conv.openFiles.includes(access.path)) conv.openFiles.push(access.path);
     saveState();
   }
 }
@@ -1952,6 +2175,21 @@ function init() {
     renderWsTabs();
     renderWsTree();
     if (state.terminalOpen && currentTerminalConvId === conv.id) updateTerminalLabel(conv);
+  });
+
+  // Attach files / images to the next message
+  attachBtn.addEventListener('click', async () => {
+    const picked = await window.files.pickAttachments();
+    if (!picked || !picked.length) return;
+    let conv = getCurrentConversation();
+    if (!conv) conv = createConversation('New Chat');
+    if (!Array.isArray(conv.pendingAttachments)) conv.pendingAttachments = [];
+    for (const p of picked) {
+      if (!conv.pendingAttachments.includes(p)) conv.pendingAttachments.push(p);
+    }
+    saveState();
+    renderAttachments();
+    inputEl.focus();
   });
 
   // Add extra context folder

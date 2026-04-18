@@ -392,6 +392,22 @@ ipcMain.handle('project:pick', async () => {
   return result.filePaths[0];
 });
 
+// File picker for chat attachments (files + images)
+ipcMain.handle('files:pick-attachments', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+    title: 'Attach files',
+    filters: [
+      { name: 'All Files', extensions: ['*'] },
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'] },
+      { name: 'Text', extensions: ['txt', 'md', 'json', 'yaml', 'yml', 'csv', 'log'] },
+      { name: 'Code', extensions: ['js', 'ts', 'jsx', 'tsx', 'py', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'sh'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return [];
+  return result.filePaths;
+});
+
 // ===== Filesystem IPC (workspace panel) =====
 const SKIP_DIR_NAMES = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
