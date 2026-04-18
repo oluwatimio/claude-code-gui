@@ -3,10 +3,12 @@ const state = {
   conversations: [],
   currentConversationId: null,
   yolo: false,
-  workspaceOpen: false,
+  rightPanel: null, // 'workspace' | 'pr' | null — mutually exclusive right-side slot
   wsTreeHeight: 260,
   sidebarWidth: 260,
   workspaceWidth: 480,
+  prPanelWidth: 480,
+  prFilter: 'mine', // 'mine' | 'all'
   terminalOpen: false,
   terminalHeight: 240,
   defaultModel: null, // last model the user picked; used as initial model for new conversations
@@ -56,6 +58,16 @@ const wsTreeEl = document.getElementById('ws-tree');
 const wsTilesEl = document.getElementById('ws-tiles');
 const wsVSplitter = document.getElementById('ws-vsplitter');
 const toggleWorkspaceBtn = document.getElementById('btn-toggle-workspace');
+const togglePrBtn = document.getElementById('btn-toggle-pr');
+const prPanel = document.getElementById('pr-panel');
+const prResizeEl = document.getElementById('pr-resize');
+const prBackBtn = document.getElementById('pr-back-btn');
+const prRefreshBtn = document.getElementById('pr-refresh-btn');
+const prHeaderLabel = document.getElementById('pr-header-label');
+const prRepoLabel = document.getElementById('pr-repo-label');
+const prFilterRowEl = document.getElementById('pr-filter-row');
+const prListEl = document.getElementById('pr-list');
+const prDetailEl = document.getElementById('pr-detail');
 const sidebarResizeEl = document.getElementById('sidebar-resize');
 const workspaceResizeEl = document.getElementById('workspace-resize');
 const chatArea = document.getElementById('chat-area');
@@ -720,10 +732,12 @@ function saveState() {
       conversations: state.conversations,
       currentConversationId: state.currentConversationId,
       yolo: state.yolo,
-      workspaceOpen: state.workspaceOpen,
+      rightPanel: state.rightPanel,
       wsTreeHeight: state.wsTreeHeight,
       sidebarWidth: state.sidebarWidth,
       workspaceWidth: state.workspaceWidth,
+      prPanelWidth: state.prPanelWidth,
+      prFilter: state.prFilter,
       terminalOpen: state.terminalOpen,
       terminalHeight: state.terminalHeight,
       defaultModel: state.defaultModel,
@@ -741,7 +755,17 @@ function loadState() {
       state.conversations = data.conversations || [];
       state.currentConversationId = data.currentConversationId;
       state.yolo = !!data.yolo;
-      state.workspaceOpen = !!data.workspaceOpen;
+      // Migrate legacy state.workspaceOpen → state.rightPanel
+      if (data.rightPanel === 'workspace' || data.rightPanel === 'pr' || data.rightPanel === null) {
+        state.rightPanel = data.rightPanel;
+      } else if (data.workspaceOpen) {
+        state.rightPanel = 'workspace';
+      } else {
+        state.rightPanel = null;
+      }
+      if (data.prFilter === 'all' || data.prFilter === 'mine') {
+        state.prFilter = data.prFilter;
+      }
       if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) {
         state.wsTreeHeight = data.wsTreeHeight;
       }
@@ -750,6 +774,9 @@ function loadState() {
       }
       if (typeof data.workspaceWidth === 'number' && data.workspaceWidth >= 320) {
         state.workspaceWidth = data.workspaceWidth;
+      }
+      if (typeof data.prPanelWidth === 'number' && data.prPanelWidth >= 340) {
+        state.prPanelWidth = data.prPanelWidth;
       }
       state.terminalOpen = !!data.terminalOpen;
       if (typeof data.terminalHeight === 'number' && data.terminalHeight >= 120) {
@@ -1099,18 +1126,31 @@ function ensureWsState(conv) {
   if (conv.activeWsTab === undefined) conv.activeWsTab = null;
 }
 
-function applyWorkspaceVisibility() {
-  workspacePanel.classList.toggle('collapsed', !state.workspaceOpen);
-  toggleWorkspaceBtn.classList.toggle('active', state.workspaceOpen);
+function applyRightPanelVisibility() {
+  const isWs = state.rightPanel === 'workspace';
+  const isPr = state.rightPanel === 'pr';
+  workspacePanel.classList.toggle('collapsed', !isWs);
+  toggleWorkspaceBtn.classList.toggle('active', isWs);
+  prPanel.classList.toggle('collapsed', !isPr);
+  togglePrBtn.classList.toggle('active', isPr);
 }
 
 function toggleWorkspace() {
-  state.workspaceOpen = !state.workspaceOpen;
-  applyWorkspaceVisibility();
+  state.rightPanel = state.rightPanel === 'workspace' ? null : 'workspace';
+  applyRightPanelVisibility();
   saveState();
-  if (state.workspaceOpen) {
+  if (state.rightPanel === 'workspace') {
     renderWsTabs();
     renderWsTree();
+  }
+}
+
+function togglePrPanel() {
+  state.rightPanel = state.rightPanel === 'pr' ? null : 'pr';
+  applyRightPanelVisibility();
+  saveState();
+  if (state.rightPanel === 'pr') {
+    openPrPanel();
   }
 }
 
@@ -1267,9 +1307,9 @@ async function openFile(filePath, opts = {}) {
   ensureWsState(conv);
   const roots = workspaceRoots();
   if (roots.length === 0) return;
-  if (!state.workspaceOpen) {
-    state.workspaceOpen = true;
-    applyWorkspaceVisibility();
+  if (state.rightPanel !== 'workspace') {
+    state.rightPanel = 'workspace';
+    applyRightPanelVisibility();
     saveState();
   }
 
@@ -1425,6 +1465,7 @@ function applyPanelWidths() {
   sidebar.style.width = `${state.sidebarWidth}px`;
   sidebar.style.minWidth = `${state.sidebarWidth}px`;
   workspacePanel.style.width = `${state.workspaceWidth}px`;
+  prPanel.style.width = `${state.prPanelWidth}px`;
 }
 
 const CHAT_MIN_WIDTH = 280;
@@ -1441,7 +1482,14 @@ function setupSideResize(handle, panel, onCommit, { min, edge }) {
   document.addEventListener('mousemove', (e) => {
     if (!dragging) return;
     const delta = edge === 'right' ? (e.clientX - startX) : (startX - e.clientX);
-    const otherPanel = panel === sidebar ? workspacePanel : sidebar;
+    // When dragging a right-side panel the "other" is the sidebar. When dragging the
+    // sidebar the "other" is whichever right-side panel is currently visible.
+    let otherPanel;
+    if (panel === sidebar) {
+      otherPanel = (!prPanel.classList.contains('collapsed')) ? prPanel : workspacePanel;
+    } else {
+      otherPanel = sidebar;
+    }
     const otherWidth = otherPanel.classList.contains('collapsed')
       ? 0
       : otherPanel.getBoundingClientRect().width;
@@ -2012,6 +2060,455 @@ async function renderMemories(query = '') {
   });
 }
 
+// ===== PR Panel =====
+const prState = {
+  repo: null, // { owner, name, url }
+  authOk: null, // true | false | null (unknown)
+  view: 'list', // 'list' | 'detail'
+  currentPr: null, // { number, title, ... } in detail view
+  listing: false,
+};
+
+function ghProjectPath() {
+  const conv = getCurrentConversation();
+  return conv ? (conv.projectPath || conv.worktreePath || null) : null;
+}
+
+function showPrView(view) {
+  prState.view = view;
+  prListEl.classList.toggle('hidden', view !== 'list');
+  prDetailEl.classList.toggle('hidden', view !== 'detail');
+  prBackBtn.classList.toggle('hidden', view !== 'detail');
+  prHeaderLabel.textContent = view === 'detail' ? `PR #${prState.currentPr ? prState.currentPr.number : ''}` : 'Pull Requests';
+}
+
+async function openPrPanel() {
+  const cwd = ghProjectPath();
+  if (!cwd) {
+    prState.repo = null;
+    prListEl.innerHTML = '<div class="pr-state-msg">No project selected. Pick a folder first.</div>';
+    prRepoLabel.textContent = '';
+    showPrView('list');
+    return;
+  }
+  // Check auth lazily
+  if (prState.authOk !== true) {
+    const auth = await window.gh.authStatus();
+    prState.authOk = !!auth.ok;
+    if (!prState.authOk) {
+      prListEl.innerHTML = `
+        <div class="pr-state-msg">
+          GitHub CLI is not authenticated.<br>
+          Run <code>gh auth login</code> in your terminal, then refresh.
+        </div>`;
+      prRepoLabel.textContent = '';
+      showPrView('list');
+      return;
+    }
+  }
+  // Discover repo
+  const repo = await window.gh.repoInfo(cwd);
+  prState.repo = repo;
+  if (!repo || !repo.owner || !repo.name) {
+    prListEl.innerHTML = '<div class="pr-state-msg">This project has no GitHub remote configured.</div>';
+    prRepoLabel.textContent = '';
+    showPrView('list');
+    return;
+  }
+  prRepoLabel.textContent = `${repo.owner}/${repo.name}`;
+  await refreshPrList();
+}
+
+async function refreshPrList() {
+  const cwd = ghProjectPath();
+  if (!cwd || !prState.repo) return;
+  if (prState.listing) return;
+  prState.listing = true;
+  prListEl.innerHTML = '<div class="pr-state-msg">Loading…</div>';
+  const res = await window.gh.prList(cwd, state.prFilter);
+  prState.listing = false;
+  if (!res.ok) {
+    prListEl.innerHTML = `<div class="pr-state-msg">Error: ${escapeHtml(res.error)}</div>`;
+    return;
+  }
+  renderPrList(res.prs || []);
+}
+
+function reviewDecisionBadge(decision) {
+  if (decision === 'APPROVED') return { cls: 'pr-badge-approved', text: 'Approved' };
+  if (decision === 'CHANGES_REQUESTED') return { cls: 'pr-badge-changes', text: 'Changes' };
+  if (decision === 'REVIEW_REQUIRED') return { cls: 'pr-badge-review', text: 'Review' };
+  return null;
+}
+
+function formatRelativeTime(isoStr) {
+  if (!isoStr) return '';
+  const then = new Date(isoStr).getTime();
+  if (!Number.isFinite(then)) return '';
+  const diff = Date.now() - then;
+  const mins = Math.round(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(isoStr).toLocaleDateString();
+}
+
+function renderPrList(prs) {
+  prListEl.innerHTML = '';
+  if (!prs.length) {
+    prListEl.innerHTML = '<div class="pr-state-msg">No open PRs.</div>';
+    return;
+  }
+  for (const pr of prs) {
+    const row = document.createElement('div');
+    row.className = 'pr-row';
+    row.addEventListener('click', () => openPrDetail(pr));
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'pr-row-title';
+    const num = document.createElement('span');
+    num.className = 'pr-number';
+    num.textContent = `#${pr.number}`;
+    titleRow.appendChild(num);
+    const title = document.createElement('span');
+    title.className = 'pr-title-text';
+    title.textContent = pr.title || '';
+    titleRow.appendChild(title);
+    row.appendChild(titleRow);
+
+    const meta = document.createElement('div');
+    meta.className = 'pr-row-meta';
+    const author = document.createElement('span');
+    author.textContent = `@${pr.author && pr.author.login || '?'}`;
+    meta.appendChild(author);
+    const updated = document.createElement('span');
+    updated.textContent = formatRelativeTime(pr.updatedAt);
+    meta.appendChild(updated);
+    if (pr.isDraft) {
+      const badge = document.createElement('span');
+      badge.className = 'pr-badge pr-badge-draft';
+      badge.textContent = 'Draft';
+      meta.appendChild(badge);
+    }
+    const rev = reviewDecisionBadge(pr.reviewDecision);
+    if (rev) {
+      const badge = document.createElement('span');
+      badge.className = `pr-badge ${rev.cls}`;
+      badge.textContent = rev.text;
+      meta.appendChild(badge);
+    }
+    row.appendChild(meta);
+    prListEl.appendChild(row);
+  }
+}
+
+async function openPrDetail(pr) {
+  prState.currentPr = pr;
+  showPrView('detail');
+  prDetailEl.innerHTML = '<div class="pr-state-msg">Loading…</div>';
+  const cwd = ghProjectPath();
+  const res = await window.gh.prDetail(cwd, pr.number);
+  if (!res.ok) {
+    prDetailEl.innerHTML = `<div class="pr-state-msg">Error: ${escapeHtml(res.error)}</div>`;
+    return;
+  }
+  renderPrDetail(res.pr, res.reviewComments || [], res.issueComments || []);
+}
+
+function groupReviewThreads(comments) {
+  // GitHub's review comments link replies to a root via `in_reply_to_id`.
+  // Build a map from root id → thread (in chronological order).
+  const byId = new Map();
+  for (const c of comments) byId.set(c.id, c);
+  const threads = new Map(); // root id → array of comments
+  for (const c of comments) {
+    let root = c;
+    while (root.in_reply_to_id && byId.has(root.in_reply_to_id)) {
+      root = byId.get(root.in_reply_to_id);
+    }
+    if (!threads.has(root.id)) threads.set(root.id, []);
+    threads.get(root.id).push(c);
+  }
+  for (const list of threads.values()) {
+    list.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  }
+  return Array.from(threads.values());
+}
+
+function renderPrDetail(pr, reviewComments, issueComments) {
+  prDetailEl.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'pr-detail-header';
+  const title = document.createElement('div');
+  title.className = 'pr-detail-title';
+  title.textContent = pr.title || '';
+  header.appendChild(title);
+  const meta = document.createElement('div');
+  meta.className = 'pr-detail-meta';
+  const author = document.createElement('span');
+  author.textContent = `@${pr.author && pr.author.login || '?'}`;
+  meta.appendChild(author);
+  const branches = document.createElement('span');
+  branches.textContent = `${pr.headRefName} → ${pr.baseRefName}`;
+  meta.appendChild(branches);
+  if (pr.reviewDecision) {
+    const rev = reviewDecisionBadge(pr.reviewDecision);
+    if (rev) {
+      const badge = document.createElement('span');
+      badge.className = `pr-badge ${rev.cls}`;
+      badge.textContent = rev.text;
+      meta.appendChild(badge);
+    }
+  }
+  const openLink = document.createElement('a');
+  openLink.href = pr.url;
+  openLink.textContent = 'Open on GitHub';
+  openLink.style.marginLeft = 'auto';
+  openLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    window.shellAPI.openExternal(pr.url);
+  });
+  meta.appendChild(openLink);
+  header.appendChild(meta);
+  prDetailEl.appendChild(header);
+
+  if (pr.body) {
+    const body = document.createElement('div');
+    body.className = 'pr-detail-body';
+    body.textContent = pr.body;
+    prDetailEl.appendChild(body);
+  }
+
+  // Review threads (inline code comments)
+  const threads = groupReviewThreads(reviewComments);
+  if (threads.length) {
+    const h = document.createElement('div');
+    h.className = 'pr-section-header';
+    h.textContent = 'Review threads';
+    prDetailEl.appendChild(h);
+    for (const thread of threads) {
+      prDetailEl.appendChild(renderReviewThread(pr, thread));
+    }
+  }
+
+  // Issue-level comments (top of PR discussion)
+  if (issueComments.length) {
+    const h = document.createElement('div');
+    h.className = 'pr-section-header';
+    h.textContent = 'Discussion';
+    prDetailEl.appendChild(h);
+    for (const c of issueComments) {
+      prDetailEl.appendChild(renderIssueComment(pr, c));
+    }
+  }
+
+  // Composer for a new top-level comment
+  prDetailEl.appendChild(renderIssueComposer(pr));
+}
+
+function renderReviewThread(pr, thread) {
+  const root = thread[0];
+  const wrap = document.createElement('div');
+  wrap.className = 'pr-thread';
+
+  const anchor = document.createElement('div');
+  anchor.className = 'pr-thread-anchor';
+  const linePart = root.line ? `:${root.line}` : (root.original_line ? `:${root.original_line}` : '');
+  anchor.textContent = `${root.path || ''}${linePart}`;
+  wrap.appendChild(anchor);
+
+  if (root.diff_hunk) {
+    const diff = document.createElement('pre');
+    diff.className = 'pr-comment-diff';
+    diff.textContent = root.diff_hunk;
+    wrap.appendChild(diff);
+  }
+
+  for (const c of thread) {
+    wrap.appendChild(renderComment(c));
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'pr-thread-actions';
+  const replyBtn = document.createElement('button');
+  replyBtn.className = 'pr-action-btn';
+  replyBtn.textContent = 'Reply';
+  actions.appendChild(replyBtn);
+  const helpBtn = document.createElement('button');
+  helpBtn.className = 'pr-action-btn pr-action-btn-primary';
+  helpBtn.textContent = 'Help me respond';
+  helpBtn.addEventListener('click', () => helpMeRespondThread(pr, thread));
+  actions.appendChild(helpBtn);
+  wrap.appendChild(actions);
+
+  const composer = renderReplyComposer(pr, root.id);
+  composer.classList.add('hidden');
+  replyBtn.addEventListener('click', () => composer.classList.toggle('hidden'));
+  wrap.appendChild(composer);
+
+  return wrap;
+}
+
+function renderIssueComment(pr, c) {
+  const wrap = document.createElement('div');
+  wrap.className = 'pr-thread';
+  wrap.appendChild(renderComment(c));
+  const actions = document.createElement('div');
+  actions.className = 'pr-thread-actions';
+  const helpBtn = document.createElement('button');
+  helpBtn.className = 'pr-action-btn pr-action-btn-primary';
+  helpBtn.textContent = 'Help me respond';
+  helpBtn.addEventListener('click', () => helpMeRespondIssueComment(pr, c));
+  actions.appendChild(helpBtn);
+  wrap.appendChild(actions);
+  return wrap;
+}
+
+function renderComment(c) {
+  const el = document.createElement('div');
+  el.className = 'pr-comment';
+  const head = document.createElement('div');
+  head.className = 'pr-comment-head';
+  const author = document.createElement('span');
+  author.className = 'pr-author';
+  author.textContent = `@${c.user && c.user.login || '?'}`;
+  head.appendChild(author);
+  const when = document.createElement('span');
+  when.textContent = formatRelativeTime(c.created_at);
+  head.appendChild(when);
+  el.appendChild(head);
+  const body = document.createElement('div');
+  body.className = 'pr-comment-body';
+  body.textContent = c.body || '';
+  el.appendChild(body);
+  return el;
+}
+
+function renderReplyComposer(pr, inReplyToId) {
+  const wrap = document.createElement('div');
+  wrap.className = 'pr-reply-composer';
+  const ta = document.createElement('textarea');
+  ta.placeholder = 'Reply to thread…';
+  wrap.appendChild(ta);
+  const actions = document.createElement('div');
+  actions.className = 'pr-reply-composer-actions';
+  const cancel = document.createElement('button');
+  cancel.className = 'pr-action-btn';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', () => {
+    ta.value = '';
+    wrap.classList.add('hidden');
+  });
+  actions.appendChild(cancel);
+  const submit = document.createElement('button');
+  submit.className = 'pr-action-btn pr-action-btn-primary';
+  submit.textContent = 'Reply';
+  submit.addEventListener('click', async () => {
+    const body = ta.value.trim();
+    if (!body) return;
+    submit.disabled = true;
+    submit.textContent = 'Posting…';
+    const res = await window.gh.prReplyReview(ghProjectPath(), pr.number, inReplyToId, body);
+    submit.disabled = false;
+    submit.textContent = 'Reply';
+    if (!res.ok) {
+      alert(`Reply failed: ${res.error}`);
+      return;
+    }
+    ta.value = '';
+    wrap.classList.add('hidden');
+    openPrDetail(pr);
+  });
+  actions.appendChild(submit);
+  wrap.appendChild(actions);
+  return wrap;
+}
+
+function renderIssueComposer(pr) {
+  const wrap = document.createElement('div');
+  wrap.className = 'pr-issue-composer';
+  const label = document.createElement('div');
+  label.className = 'pr-section-header';
+  label.style.margin = '0';
+  label.textContent = 'Add a comment';
+  wrap.appendChild(label);
+  const ta = document.createElement('textarea');
+  ta.placeholder = 'Write a comment…';
+  wrap.appendChild(ta);
+  const actions = document.createElement('div');
+  actions.className = 'pr-issue-composer-actions';
+  const submit = document.createElement('button');
+  submit.className = 'pr-action-btn pr-action-btn-primary';
+  submit.textContent = 'Comment';
+  submit.addEventListener('click', async () => {
+    const body = ta.value.trim();
+    if (!body) return;
+    submit.disabled = true;
+    submit.textContent = 'Posting…';
+    const res = await window.gh.prComment(ghProjectPath(), pr.number, body);
+    submit.disabled = false;
+    submit.textContent = 'Comment';
+    if (!res.ok) {
+      alert(`Comment failed: ${res.error}`);
+      return;
+    }
+    ta.value = '';
+    openPrDetail(pr);
+  });
+  actions.appendChild(submit);
+  wrap.appendChild(actions);
+  return wrap;
+}
+
+function helpMeRespondThread(pr, thread) {
+  const root = thread[0];
+  const anchor = root.path
+    ? `${root.path}${root.line ? `:${root.line}` : (root.original_line ? `:${root.original_line}` : '')}`
+    : null;
+  const lines = [
+    `Help me draft a reply to a pull-request review thread.`,
+    ``,
+    `PR: #${pr.number} "${pr.title}" — ${pr.url}`,
+  ];
+  if (anchor) lines.push(`Anchor: ${anchor}`);
+  if (root.diff_hunk) {
+    lines.push('', 'Diff context:', '```', root.diff_hunk, '```');
+  }
+  lines.push('', 'Thread:');
+  for (const c of thread) {
+    lines.push(`@${c.user && c.user.login || '?'}: ${c.body || ''}`);
+    lines.push('');
+  }
+  lines.push('Please draft a clear, thoughtful reply I can paste back. Keep it conversational and specific to what was asked.');
+  prefillChatInput(lines.join('\n'));
+}
+
+function helpMeRespondIssueComment(pr, comment) {
+  const lines = [
+    `Help me draft a reply to a pull-request comment.`,
+    ``,
+    `PR: #${pr.number} "${pr.title}" — ${pr.url}`,
+    ``,
+    `@${comment.user && comment.user.login || '?'}: ${comment.body || ''}`,
+    ``,
+    `Please draft a clear, thoughtful reply I can paste back.`,
+  ];
+  prefillChatInput(lines.join('\n'));
+}
+
+function prefillChatInput(text) {
+  inputEl.value = text;
+  autoResize();
+  inputEl.focus();
+  // Move caret to end
+  const end = inputEl.value.length;
+  try { inputEl.setSelectionRange(end, end); } catch (e) {}
+}
+
 function init() {
   // Load state
   loadState();
@@ -2023,10 +2520,11 @@ function init() {
   refreshBranch();
   renderModelSelector();
   applyPanelWidths();
-  applyWorkspaceVisibility();
+  applyRightPanelVisibility();
   renderWsTabs();
   renderWsTree();
   restoreOpenFiles();
+  if (state.rightPanel === 'pr') openPrPanel();
   setupVerticalSplit();
   if (state.terminalOpen && !getCurrentConversation()) state.terminalOpen = false;
   applyTerminalHeight();
@@ -2058,6 +2556,10 @@ function init() {
     state.workspaceWidth = w;
     saveState();
   }, { min: 320, edge: 'left' });
+  setupSideResize(prResizeEl, prPanel, (w) => {
+    state.prPanelWidth = w;
+    saveState();
+  }, { min: 340, edge: 'left' });
 
   // IPC listeners
   window.claude.onStreamStart(() => {
@@ -2246,6 +2748,30 @@ function init() {
   // Titlebar
   document.getElementById('btn-toggle-sidebar').addEventListener('click', () => sidebar.classList.toggle('collapsed'));
   toggleWorkspaceBtn.addEventListener('click', toggleWorkspace);
+  togglePrBtn.addEventListener('click', togglePrPanel);
+  prBackBtn.addEventListener('click', () => {
+    prState.currentPr = null;
+    showPrView('list');
+  });
+  prRefreshBtn.addEventListener('click', () => {
+    if (prState.view === 'detail' && prState.currentPr) {
+      openPrDetail(prState.currentPr);
+    } else {
+      openPrPanel();
+    }
+  });
+  prFilterRowEl.querySelectorAll('.pr-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const f = btn.getAttribute('data-filter');
+      if (!f || f === state.prFilter) return;
+      state.prFilter = f;
+      prFilterRowEl.querySelectorAll('.pr-filter-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-filter') === f));
+      saveState();
+      refreshPrList();
+    });
+  });
+  // Initialise filter UI from persisted state
+  prFilterRowEl.querySelectorAll('.pr-filter-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-filter') === state.prFilter));
   toggleTerminalBtn.addEventListener('click', toggleTerminal);
   killTerminalBtn.addEventListener('click', killCurrentTerminal);
   closeTerminalBtn.addEventListener('click', () => {
@@ -2273,6 +2799,11 @@ function init() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'B' || e.key === 'b')) {
       e.preventDefault();
       toggleWorkspace();
+    }
+    // Ctrl+Shift+P (Cmd+Shift+P on mac): Toggle PR panel
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
+      e.preventDefault();
+      togglePrPanel();
     }
     // Ctrl+` / Cmd+`: Toggle terminal
     if ((e.ctrlKey || e.metaKey) && e.key === '`') {

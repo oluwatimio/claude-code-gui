@@ -132,6 +132,15 @@ contextBridge.exposeInMainWorld('worktree', {
   status: (worktreePath) => ipcRenderer.invoke('worktree:status', { worktreePath }),
 });
 
+contextBridge.exposeInMainWorld('gh', {
+  authStatus: () => ipcRenderer.invoke('gh:auth-status'),
+  repoInfo: (cwd) => ipcRenderer.invoke('gh:repo-info', cwd),
+  prList: (cwd, filter) => ipcRenderer.invoke('gh:pr-list', { cwd, filter }),
+  prDetail: (cwd, number) => ipcRenderer.invoke('gh:pr-detail', { cwd, number }),
+  prComment: (cwd, number, body) => ipcRenderer.invoke('gh:pr-comment', { cwd, number, body }),
+  prReplyReview: (cwd, number, inReplyTo, body) => ipcRenderer.invoke('gh:pr-reply-review', { cwd, number, inReplyTo, body }),
+});
+
 contextBridge.exposeInMainWorld('terminal', {
   open: (params) => ipcRenderer.send('terminal:open', params),
   input: (sessionId, data) => ipcRenderer.send('terminal:input', { sessionId, data }),
