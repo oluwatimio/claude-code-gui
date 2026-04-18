@@ -76,17 +76,17 @@ contextBridge.exposeInMainWorld('libs', {
 });
 
 contextBridge.exposeInMainWorld('claude', {
-  sendPrompt: (prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs) => ipcRenderer.send('claude:send-prompt', { prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs }),
-  stopGeneration: () => ipcRenderer.send('claude:stop-generation'),
+  sendPrompt: (convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs) => ipcRenderer.send('claude:send-prompt', { convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs }),
+  stopGeneration: (convId) => ipcRenderer.send('claude:stop-generation', { convId }),
   onStreamStart: (callback) => ipcRenderer.on('claude:stream-start', (_, data) => callback(data)),
   onStreamDelta: (callback) => ipcRenderer.on('claude:stream-delta', (_, data) => callback(data)),
   onThinkingDelta: (callback) => ipcRenderer.on('claude:thinking-delta', (_, data) => callback(data)),
   onStreamEnd: (callback) => ipcRenderer.on('claude:stream-end', (_, data) => callback(data)),
-  onStreamError: (callback) => ipcRenderer.on('claude:stream-error', (_, error) => callback(error)),
+  onStreamError: (callback) => ipcRenderer.on('claude:stream-error', (_, data) => callback(data)),
   onStreamClose: (callback) => ipcRenderer.on('claude:stream-close', (_, data) => callback(data)),
   onToolUse: (callback) => ipcRenderer.on('claude:tool-use', (_, data) => callback(data)),
   onPermissionRequest: (callback) => ipcRenderer.on('permission:request', (_, data) => callback(data)),
-  respondPermission: (decision) => ipcRenderer.send('permission:response', decision),
+  respondPermission: (toolUseId, decision) => ipcRenderer.send('permission:response', { toolUseId, decision }),
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('claude:stream-start');
     ipcRenderer.removeAllListeners('claude:stream-delta');
@@ -123,6 +123,12 @@ contextBridge.exposeInMainWorld('git', {
   watch: (cwd) => ipcRenderer.send('git:watch', { cwd }),
   unwatch: (cwd) => ipcRenderer.send('git:unwatch', { cwd }),
   onBranchChanged: (cb) => ipcRenderer.on('git:branch-changed', (_, p) => cb(p)),
+});
+
+contextBridge.exposeInMainWorld('worktree', {
+  add: (projectPath, convId, branch) => ipcRenderer.invoke('worktree:add', { projectPath, convId, branch }),
+  remove: (worktreePath, force) => ipcRenderer.invoke('worktree:remove', { worktreePath, force: !!force }),
+  status: (worktreePath) => ipcRenderer.invoke('worktree:status', { worktreePath }),
 });
 
 contextBridge.exposeInMainWorld('terminal', {

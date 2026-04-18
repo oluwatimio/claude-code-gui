@@ -65,7 +65,8 @@ async function handleMessage(msg) {
     const toolInput = args.input || {};
 
     try {
-      const guiResponse = await askElectronApp(args);
+      const enriched = { ...args, conv_id: process.env.CLAUDE_GUI_CONV_ID || null };
+      const guiResponse = await askElectronApp(enriched);
 
       let responsePayload;
       if (guiResponse.behavior === 'deny') {
