@@ -637,7 +637,7 @@ function sendMessage(prompt) {
   stopBtn.classList.remove('hidden');
   setStatus('streaming', 'Thinking...');
 
-  const isFirstMessage = conv.messages.length === 1 || conv.pendingNewSession === true;
+  const isFirstMessage = sessionLogic.shouldStartFreshSession(conv);
   conv.pendingNewSession = false;
   window.claude.sendPrompt(conv.id, prompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? []);
   renderConversationList();
@@ -1634,8 +1634,7 @@ async function toggleWorktree() {
     }
     conv.worktreePath = null;
     conv.worktreeBranch = null;
-    conv.sessionId = generateUUID();
-    conv.pendingNewSession = true;
+    sessionLogic.resetSessionForContextSwitch(conv, generateUUID);
     saveState();
     renderProjectPill();
     refreshBranch();
@@ -1667,8 +1666,7 @@ async function toggleWorktree() {
     const res = await window.worktree.add(conv.projectPath, conv.id, branch.trim());
     conv.worktreePath = res.worktreePath;
     conv.worktreeBranch = res.branch;
-    conv.sessionId = generateUUID();
-    conv.pendingNewSession = true;
+    sessionLogic.resetSessionForContextSwitch(conv, generateUUID);
     saveState();
     renderProjectPill();
     refreshBranch();

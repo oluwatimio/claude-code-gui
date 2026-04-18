@@ -6,6 +6,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "test": "node --test tests/*.test.js",
     "build": "electron-builder --linux pacman AppImage",
     "build:appimage": "electron-builder --linux AppImage",
     "build:pacman": "electron-builder --linux pacman",

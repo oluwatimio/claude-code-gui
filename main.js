@@ -7,6 +7,11 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('node:crypto');
 const pty = require('node-pty');
+const {
+  buildClaudeArgs,
+  shouldSurfaceStderr,
+  processStreamEvent: processStreamEventPure,
+} = require('./lib/claude-cli');
 
 const terminals = new Map(); // sessionId -> { pty, webContents }
 
@@ -709,37 +714,10 @@ ipcMain.on('claude:send-prompt', (event, data) => {
   }
 
   const claudeBin = findClaudeBinary();
-  const args = [
-    '-p',
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--mcp-config', mcpConfigPath,
-  ];
-
-  if (yolo) {
-    args.push('--dangerously-skip-permissions');
-  } else {
-    args.push('--permission-prompt-tool', 'mcp__gui_permissions__approve_permission');
-  }
-
-  if (model) {
-    args.push('--model', model);
-  }
-
-  if (Array.isArray(extraDirs) && extraDirs.length) {
-    const valid = extraDirs.filter(d => d && fs.existsSync(d));
-    if (valid.length) {
-      args.push('--add-dir', ...valid);
-    }
-  }
-
-  if (sessionId) {
-    if (isFirst) {
-      args.push('--session-id', sessionId);
-    } else {
-      args.push('--resume', sessionId);
-    }
-  }
+  const args = buildClaudeArgs(
+    { sessionId, isFirst, yolo, mcpConfigPath, model, extraDirs },
+    (p) => fs.existsSync(p)
+  );
 
   const cwd = (projectPath && fs.existsSync(projectPath)) ? projectPath : undefined;
 
@@ -782,8 +760,7 @@ ipcMain.on('claude:send-prompt', (event, data) => {
 
   child.stderr.on('data', (data) => {
     const text = data.toString().trim();
-    if (!text) return;
-    if (text.includes('Error') || text.includes('error') || text.includes('fatal') || text.includes('not found') || text.includes('No conversation found') || text.includes('ENOENT') || text.includes('failed')) {
+    if (shouldSurfaceStderr(text)) {
       event.sender.send('claude:stream-error', { convId, error: text });
     }
   });
@@ -805,36 +782,8 @@ ipcMain.on('claude:send-prompt', (event, data) => {
 });
 
 function processStreamEvent(event, convId, obj) {
-  if (obj.type === 'assistant' && obj.message) {
-    const content = obj.message.content || [];
-    for (const block of content) {
-      if (block.type === 'text' && block.text) {
-        event.sender.send('claude:stream-delta', { convId, text: block.text });
-      }
-      if (block.type === 'thinking' && block.thinking) {
-        event.sender.send('claude:thinking-delta', { convId, text: block.thinking });
-      }
-      if (block.type === 'tool_use') {
-        event.sender.send('claude:tool-use', {
-          convId,
-          name: block.name,
-          input: block.input
-        });
-      }
-    }
-  } else if (obj.type === 'result') {
-    if (obj.is_error) {
-      const msg = (Array.isArray(obj.errors) && obj.errors.length) ? obj.errors.join('; ') : (obj.subtype || 'Claude CLI returned an error');
-      event.sender.send('claude:stream-error', { convId, error: msg });
-      return;
-    }
-    event.sender.send('claude:stream-end', {
-      convId,
-      result: obj.result,
-      cost: obj.total_cost_usd,
-      duration: obj.duration_ms,
-      model: Object.keys(obj.modelUsage || {})[0] || ''
-    });
+  for (const { channel, payload } of processStreamEventPure(obj)) {
+    event.sender.send(channel, { convId, ...payload });
   }
 }
 
