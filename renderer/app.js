@@ -2215,7 +2215,7 @@ async function openPrDetail(pr) {
     prDetailEl.innerHTML = `<div class="pr-state-msg">Error: ${escapeHtml(res.error)}</div>`;
     return;
   }
-  renderPrDetail(res.pr, res.reviewComments || [], res.issueComments || []);
+  renderPrDetail(res.pr, res.reviewComments || [], res.issueComments || [], res.reviews || []);
 }
 
 function groupReviewThreads(comments) {
@@ -2238,7 +2238,7 @@ function groupReviewThreads(comments) {
   return Array.from(threads.values());
 }
 
-function renderPrDetail(pr, reviewComments, issueComments) {
+function renderPrDetail(pr, reviewComments, issueComments, reviews = []) {
   prDetailEl.innerHTML = '';
 
   const header = document.createElement('div');
@@ -2281,6 +2281,18 @@ function renderPrDetail(pr, reviewComments, issueComments) {
     body.className = 'pr-detail-body';
     body.textContent = pr.body;
     prDetailEl.appendChild(body);
+  }
+
+  // Review summaries (top-level body from submitted reviews — Approve/Request changes/Comment)
+  const reviewsWithBody = (reviews || []).filter(r => r && r.body && r.body.trim());
+  if (reviewsWithBody.length) {
+    const h = document.createElement('div');
+    h.className = 'pr-section-header';
+    h.textContent = 'Reviews';
+    prDetailEl.appendChild(h);
+    for (const r of reviewsWithBody) {
+      prDetailEl.appendChild(renderReviewSummary(pr, r));
+    }
   }
 
   // Review threads (inline code comments)
@@ -2349,6 +2361,58 @@ function renderReviewThread(pr, thread) {
   composer.classList.add('hidden');
   replyBtn.addEventListener('click', () => composer.classList.toggle('hidden'));
   wrap.appendChild(composer);
+
+  return wrap;
+}
+
+function reviewStateBadge(reviewState) {
+  switch ((reviewState || '').toUpperCase()) {
+    case 'APPROVED': return { cls: 'pr-badge-approved', text: 'Approved' };
+    case 'CHANGES_REQUESTED': return { cls: 'pr-badge-changes', text: 'Changes requested' };
+    case 'COMMENTED': return { cls: 'pr-badge-review', text: 'Commented' };
+    case 'DISMISSED': return { cls: 'pr-badge-draft', text: 'Dismissed' };
+    default: return null;
+  }
+}
+
+function renderReviewSummary(pr, review) {
+  const wrap = document.createElement('div');
+  wrap.className = 'pr-thread';
+
+  const head = document.createElement('div');
+  head.className = 'pr-comment-head';
+  head.style.padding = '8px 10px 0';
+  const author = document.createElement('span');
+  author.className = 'pr-author';
+  author.textContent = `@${review.user && review.user.login || '?'}`;
+  head.appendChild(author);
+  const when = document.createElement('span');
+  when.textContent = formatRelativeTime(review.submitted_at);
+  head.appendChild(when);
+  const badge = reviewStateBadge(review.state);
+  if (badge) {
+    const b = document.createElement('span');
+    b.className = `pr-badge ${badge.cls}`;
+    b.textContent = badge.text;
+    b.style.marginLeft = 'auto';
+    head.appendChild(b);
+  }
+  wrap.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'pr-comment-body';
+  body.style.padding = '4px 10px 10px';
+  body.textContent = review.body || '';
+  wrap.appendChild(body);
+
+  const actions = document.createElement('div');
+  actions.className = 'pr-thread-actions';
+  const helpBtn = document.createElement('button');
+  helpBtn.className = 'pr-action-btn pr-action-btn-primary';
+  helpBtn.textContent = 'Help me respond';
+  helpBtn.addEventListener('click', () => helpMeRespondReview(pr, review));
+  actions.appendChild(helpBtn);
+  wrap.appendChild(actions);
 
   return wrap;
 }
@@ -2484,6 +2548,22 @@ function helpMeRespondThread(pr, thread) {
     lines.push('');
   }
   lines.push('Please draft a clear, thoughtful reply I can paste back. Keep it conversational and specific to what was asked.');
+  prefillChatInput(lines.join('\n'));
+}
+
+function helpMeRespondReview(pr, review) {
+  const verdict = reviewStateBadge(review.state);
+  const lines = [
+    `Help me draft a reply to a pull-request review.`,
+    ``,
+    `PR: #${pr.number} "${pr.title}" — ${pr.url}`,
+    `Reviewer verdict: ${verdict ? verdict.text : (review.state || 'Commented')}`,
+    ``,
+    `@${review.user && review.user.login || '?'} wrote:`,
+    review.body || '',
+    ``,
+    `Please draft a clear, thoughtful reply I can paste back. Address the reviewer's verdict directly.`,
+  ];
   prefillChatInput(lines.join('\n'));
 }
 

@@ -498,24 +498,26 @@ ipcMain.handle('gh:pr-list', async (_, { cwd, filter } = {}) => {
   return { ok: true, prs: data };
 });
 
-// Detail view: PR body + inline review comments + issue (top-level) comments.
+// Detail view: PR body + inline review comments + issue (top-level) comments + review summaries.
 ipcMain.handle('gh:pr-detail', async (_, { cwd, number } = {}) => {
   if (!cwd || !number) return { ok: false, error: 'Missing cwd or PR number' };
   const viewArgs = [
     'pr', 'view', String(number),
     '--json', 'number,title,body,author,state,isDraft,url,baseRefName,headRefName,reviewDecision,updatedAt,createdAt',
   ];
-  const [view, reviewComments, issueComments] = await Promise.all([
+  const [view, reviewComments, issueComments, reviews] = await Promise.all([
     runGh(viewArgs, { cwd }),
     runGh(['api', `repos/{owner}/{repo}/pulls/${number}/comments`, '--paginate'], { cwd }),
     runGh(['api', `repos/{owner}/{repo}/issues/${number}/comments`, '--paginate'], { cwd }),
+    runGh(['api', `repos/{owner}/{repo}/pulls/${number}/reviews`, '--paginate'], { cwd }),
   ]);
   if (view.code !== 0) return { ok: false, error: view.stderr.trim() || 'gh pr view failed' };
   const pr = parseJsonSafe(view.stdout);
   if (!pr) return { ok: false, error: 'Unable to parse PR' };
   const reviewCommentsData = parseJsonSafe(reviewComments.stdout) || [];
   const issueCommentsData = parseJsonSafe(issueComments.stdout) || [];
-  return { ok: true, pr, reviewComments: reviewCommentsData, issueComments: issueCommentsData };
+  const reviewsData = parseJsonSafe(reviews.stdout) || [];
+  return { ok: true, pr, reviewComments: reviewCommentsData, issueComments: issueCommentsData, reviews: reviewsData };
 });
 
 // Post a top-level PR comment (issue comment).
