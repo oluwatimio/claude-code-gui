@@ -6,6 +6,9 @@ const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const crypto = require('node:crypto');
+const pty = require('node-pty');
+
+const terminals = new Map(); // sessionId -> { pty, webContents }
 
 let mainWindow;
 let currentProcess = null;
@@ -345,6 +348,14 @@ function cleanup() {
   if (permissionServer) permissionServer.close();
   if (mcpConfigPath) try { fs.unlinkSync(mcpConfigPath); } catch (e) {}
   if (contextDb) try { contextDb.close(); } catch (e) {}
+  for (const { pty: p } of terminals.values()) {
+    try { p.kill(); } catch (e) {}
+  }
+  terminals.clear();
+  for (const w of branchWatchers.values()) {
+    try { w.close(); } catch (e) {}
+  }
+  branchWatchers.clear();
 }
 
 app.on('window-all-closed', () => {
@@ -368,6 +379,217 @@ ipcMain.handle('project:pick', async () => {
   if (result.canceled || !result.filePaths.length) return null;
   return result.filePaths[0];
 });
+
+// ===== Filesystem IPC (workspace panel) =====
+const SKIP_DIR_NAMES = new Set([
+  'node_modules', '.git', 'dist', 'build', '.next', '.nuxt',
+  '.venv', 'venv', '__pycache__', '.DS_Store', '.turbo', '.cache',
+  '.idea', '.vscode', 'target', '.gradle',
+]);
+
+const EXT_LANG = {
+  '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascript',
+  '.ts': 'typescript', '.tsx': 'typescript',
+  '.py': 'python', '.rb': 'ruby', '.go': 'go', '.rs': 'rust',
+  '.java': 'java', '.kt': 'kotlin', '.swift': 'swift',
+  '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.cc': 'cpp', '.hpp': 'cpp',
+  '.cs': 'csharp', '.php': 'php', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+  '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'toml',
+  '.xml': 'xml', '.html': 'xml', '.htm': 'xml', '.svg': 'xml',
+  '.css': 'css', '.scss': 'scss', '.sass': 'scss', '.less': 'less',
+  '.md': 'markdown', '.markdown': 'markdown',
+  '.sql': 'sql', '.graphql': 'graphql', '.gql': 'graphql',
+  '.dockerfile': 'dockerfile', '.ini': 'ini', '.env': 'ini',
+  '.vue': 'xml', '.svelte': 'xml',
+};
+
+function extToLang(p) {
+  const ext = path.extname(p).toLowerCase();
+  if (EXT_LANG[ext]) return EXT_LANG[ext];
+  const base = path.basename(p).toLowerCase();
+  if (base === 'dockerfile') return 'dockerfile';
+  if (base === 'makefile') return 'makefile';
+  return '';
+}
+
+function isInsideAnyRoot(p, roots) {
+  if (!Array.isArray(roots) || roots.length === 0) return false;
+  const resolved = path.resolve(p);
+  return roots.some(r => {
+    if (!r) return false;
+    const rr = path.resolve(r);
+    return resolved === rr || resolved.startsWith(rr + path.sep);
+  });
+}
+
+ipcMain.handle('fs:list-dir', async (_, roots, dirPath) => {
+  if (!dirPath || !isInsideAnyRoot(dirPath, roots)) {
+    throw new Error('Path not allowed');
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch (e) {
+    throw new Error(`Cannot read directory: ${e.message}`);
+  }
+  const out = [];
+  for (const e of entries) {
+    if (SKIP_DIR_NAMES.has(e.name)) continue;
+    const isDir = e.isDirectory();
+    out.push({
+      name: e.name,
+      path: path.join(dirPath, e.name),
+      isDir,
+    });
+  }
+  out.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  return out;
+});
+
+ipcMain.handle('fs:read-file', async (_, roots, filePath) => {
+  if (!filePath || !isInsideAnyRoot(filePath, roots)) {
+    throw new Error('Path not allowed');
+  }
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (e) {
+    throw new Error(`Cannot stat file: ${e.message}`);
+  }
+  if (stat.isDirectory()) throw new Error('Is a directory');
+  const MAX_BYTES = 2 * 1024 * 1024;
+  if (stat.size > MAX_BYTES) {
+    return { tooLarge: true, size: stat.size, lang: extToLang(filePath) };
+  }
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const sniffLen = Math.min(4096, stat.size);
+    const sniff = Buffer.alloc(sniffLen);
+    if (sniffLen > 0) fs.readSync(fd, sniff, 0, sniffLen, 0);
+    for (let i = 0; i < sniffLen; i++) {
+      if (sniff[i] === 0) {
+        return { binary: true, size: stat.size };
+      }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  const content = fs.readFileSync(filePath, 'utf8');
+  return { content, size: stat.size, lang: extToLang(filePath) };
+});
+
+ipcMain.handle('fs:path-info', async (_, roots, p) => {
+  if (!p || !isInsideAnyRoot(p, roots)) {
+    return { exists: false };
+  }
+  try {
+    const stat = fs.statSync(p);
+    return { exists: true, isDir: stat.isDirectory(), size: stat.size };
+  } catch (e) {
+    return { exists: false };
+  }
+});
+
+// ===== Git branch =====
+const { execFile } = require('child_process');
+const branchWatchers = new Map(); // cwd -> fs.FSWatcher
+
+function getGitBranch(cwd) {
+  return new Promise((resolve) => {
+    if (!cwd || !fs.existsSync(cwd)) return resolve(null);
+    execFile('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const branch = stdout.trim();
+      resolve(branch && branch !== 'HEAD' ? branch : null);
+    });
+  });
+}
+
+ipcMain.handle('git:branch', async (_, cwd) => getGitBranch(cwd));
+
+ipcMain.on('git:watch', (event, { cwd }) => {
+  if (!cwd || branchWatchers.has(cwd)) return;
+  const headPath = path.join(cwd, '.git', 'HEAD');
+  if (!fs.existsSync(headPath)) return;
+  try {
+    const w = fs.watch(headPath, { persistent: false }, async () => {
+      const branch = await getGitBranch(cwd);
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('git:branch-changed', { cwd, branch });
+      }
+    });
+    branchWatchers.set(cwd, w);
+  } catch (e) {}
+});
+
+ipcMain.on('git:unwatch', (_, { cwd }) => {
+  const w = branchWatchers.get(cwd);
+  if (w) {
+    try { w.close(); } catch (e) {}
+    branchWatchers.delete(cwd);
+  }
+});
+
+// ===== Terminal (PTY) =====
+ipcMain.on('terminal:open', (event, { sessionId, cwd, cols, rows }) => {
+  if (!sessionId) return;
+  if (terminals.has(sessionId)) return;
+  const shell = process.env.SHELL
+    || (process.platform === 'win32' ? 'powershell.exe' : '/bin/bash');
+  const startDir = (cwd && fs.existsSync(cwd)) ? cwd : os.homedir();
+  let p;
+  try {
+    p = pty.spawn(shell, [], {
+      name: 'xterm-256color',
+      cols: cols || 80,
+      rows: rows || 24,
+      cwd: startDir,
+      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+    });
+  } catch (e) {
+    event.sender.send('terminal:exit', { sessionId, code: -1, error: e.message });
+    return;
+  }
+  const entry = { pty: p, webContents: event.sender };
+  terminals.set(sessionId, entry);
+  p.onData((data) => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('terminal:data', { sessionId, data });
+    }
+  });
+  p.onExit(({ exitCode }) => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send('terminal:exit', { sessionId, code: exitCode });
+    }
+    terminals.delete(sessionId);
+  });
+});
+
+ipcMain.on('terminal:input', (_, { sessionId, data }) => {
+  const t = terminals.get(sessionId);
+  if (t) {
+    try { t.pty.write(data); } catch (e) {}
+  }
+});
+
+ipcMain.on('terminal:resize', (_, { sessionId, cols, rows }) => {
+  const t = terminals.get(sessionId);
+  if (!t) return;
+  try { t.pty.resize(cols || 80, rows || 24); } catch (e) {}
+});
+
+ipcMain.on('terminal:kill', (_, { sessionId }) => {
+  const t = terminals.get(sessionId);
+  if (t) {
+    try { t.pty.kill(); } catch (e) {}
+    terminals.delete(sessionId);
+  }
+});
+
+ipcMain.handle('terminal:exists', async (_, { sessionId }) => terminals.has(sessionId));
 
 // ===== Claude CLI Integration =====
 ipcMain.on('claude:send-prompt', (event, data) => {

@@ -6,6 +6,12 @@ const state = {
   currentStreamContent: '',
   currentThinkingContent: '',
   yolo: false,
+  workspaceOpen: false,
+  wsTreeHeight: 260,
+  sidebarWidth: 260,
+  workspaceWidth: 480,
+  terminalOpen: false,
+  terminalHeight: 240,
 };
 
 // ===== DOM Elements =====
@@ -27,6 +33,24 @@ const addDirBtn = document.getElementById('add-dir-btn');
 const modelSelector = document.getElementById('model-selector');
 const modelLabel = document.getElementById('model-label');
 const modelMenu = document.getElementById('model-menu');
+const workspacePanel = document.getElementById('workspace-panel');
+const wsTabsEl = document.getElementById('ws-tabs');
+const wsTreeEl = document.getElementById('ws-tree');
+const wsTilesEl = document.getElementById('ws-tiles');
+const wsVSplitter = document.getElementById('ws-vsplitter');
+const toggleWorkspaceBtn = document.getElementById('btn-toggle-workspace');
+const sidebarResizeEl = document.getElementById('sidebar-resize');
+const workspaceResizeEl = document.getElementById('workspace-resize');
+const chatArea = document.getElementById('chat-area');
+const terminalPanel = document.getElementById('terminal-panel');
+const terminalBody = document.getElementById('terminal-body');
+const terminalHandle = document.getElementById('terminal-resize-handle');
+const terminalLabel = document.getElementById('terminal-label');
+const toggleTerminalBtn = document.getElementById('btn-toggle-terminal');
+const killTerminalBtn = document.getElementById('btn-terminal-kill');
+const closeTerminalBtn = document.getElementById('btn-terminal-close');
+const branchPill = document.getElementById('branch-pill');
+const branchLabel = document.getElementById('branch-label');
 
 // Model options. `value: null` means "don't pass --model" (use user's global default).
 // Label = what humans read. id = the literal CLI value passed via --model.
@@ -68,6 +92,39 @@ function basename(p) {
   if (!p) return '';
   const parts = p.split('/').filter(Boolean);
   return parts[parts.length - 1] || p;
+}
+
+let currentBranchWatchCwd = null;
+
+async function refreshBranch() {
+  const conv = getCurrentConversation();
+  const cwd = conv && conv.projectPath;
+  if (!cwd) {
+    branchPill.classList.add('hidden');
+    branchLabel.textContent = '';
+    if (currentBranchWatchCwd) {
+      window.git.unwatch(currentBranchWatchCwd);
+      currentBranchWatchCwd = null;
+    }
+    return;
+  }
+  if (currentBranchWatchCwd !== cwd) {
+    if (currentBranchWatchCwd) window.git.unwatch(currentBranchWatchCwd);
+    window.git.watch(cwd);
+    currentBranchWatchCwd = cwd;
+  }
+  try {
+    const branch = await window.git.branch(cwd);
+    if (branch) {
+      branchLabel.textContent = branch;
+      branchPill.title = `Branch: ${branch} · click to refresh`;
+      branchPill.classList.remove('hidden');
+    } else {
+      branchPill.classList.add('hidden');
+    }
+  } catch (e) {
+    branchPill.classList.add('hidden');
+  }
 }
 
 function renderProjectPill() {
@@ -112,6 +169,8 @@ function renderExtraDirs() {
       c.extraDirs = c.extraDirs.filter(d => d !== dir);
       saveState();
       renderExtraDirs();
+      renderWsTabs();
+      renderWsTree();
     };
     chip.appendChild(remove);
 
@@ -305,11 +364,22 @@ function switchConversation(id) {
 
   renderConversationList();
   renderProjectPill();
+  refreshBranch();
   renderModelSelector();
+  renderWsTabs();
+  renderWsTree();
+  restoreOpenFiles();
+  if (state.terminalOpen) mountTerminal();
   saveState();
 }
 
 function deleteConversation(id) {
+  window.terminal.kill(id);
+  const entry = xtermByConv.get(id);
+  if (entry) {
+    try { entry.term.dispose(); } catch (e) {}
+    xtermByConv.delete(id);
+  }
   state.conversations = state.conversations.filter(c => c.id !== id);
   if (state.currentConversationId === id) {
     if (state.conversations.length > 0) {
@@ -370,7 +440,11 @@ function newChat() {
   autoResize();
   renderConversationList();
   renderProjectPill();
+  refreshBranch();
   renderModelSelector();
+  wsTilesEl.innerHTML = '';
+  renderWsTabs();
+  renderWsTree();
   inputEl.focus();
 }
 
@@ -381,6 +455,12 @@ function saveState() {
       conversations: state.conversations,
       currentConversationId: state.currentConversationId,
       yolo: state.yolo,
+      workspaceOpen: state.workspaceOpen,
+      wsTreeHeight: state.wsTreeHeight,
+      sidebarWidth: state.sidebarWidth,
+      workspaceWidth: state.workspaceWidth,
+      terminalOpen: state.terminalOpen,
+      terminalHeight: state.terminalHeight,
     }));
   } catch (e) {
     // Silently fail on storage quota
@@ -395,6 +475,20 @@ function loadState() {
       state.conversations = data.conversations || [];
       state.currentConversationId = data.currentConversationId;
       state.yolo = !!data.yolo;
+      state.workspaceOpen = !!data.workspaceOpen;
+      if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) {
+        state.wsTreeHeight = data.wsTreeHeight;
+      }
+      if (typeof data.sidebarWidth === 'number' && data.sidebarWidth >= 180) {
+        state.sidebarWidth = data.sidebarWidth;
+      }
+      if (typeof data.workspaceWidth === 'number' && data.workspaceWidth >= 320) {
+        state.workspaceWidth = data.workspaceWidth;
+      }
+      state.terminalOpen = !!data.terminalOpen;
+      if (typeof data.terminalHeight === 'number' && data.terminalHeight >= 120) {
+        state.terminalHeight = data.terminalHeight;
+      }
     }
   } catch (e) {
     // Start fresh
@@ -652,6 +746,633 @@ function hidePermissionDialog() {
 }
 
 // ===== Event Listeners =====
+// ===== Workspace Panel =====
+function workspaceRoots() {
+  const conv = getCurrentConversation();
+  if (!conv) return [];
+  const roots = [];
+  if (conv.projectPath) roots.push(conv.projectPath);
+  if (Array.isArray(conv.extraDirs)) {
+    for (const d of conv.extraDirs) if (d) roots.push(d);
+  }
+  return roots;
+}
+
+function ensureWsState(conv) {
+  if (!conv) return;
+  if (!Array.isArray(conv.openFiles)) conv.openFiles = [];
+  if (!conv.expandedDirs || typeof conv.expandedDirs !== 'object') conv.expandedDirs = {};
+  if (conv.activeWsTab === undefined) conv.activeWsTab = null;
+}
+
+function applyWorkspaceVisibility() {
+  workspacePanel.classList.toggle('collapsed', !state.workspaceOpen);
+  toggleWorkspaceBtn.classList.toggle('active', state.workspaceOpen);
+}
+
+function toggleWorkspace() {
+  state.workspaceOpen = !state.workspaceOpen;
+  applyWorkspaceVisibility();
+  saveState();
+  if (state.workspaceOpen) {
+    renderWsTabs();
+    renderWsTree();
+  }
+}
+
+function renderWsEmpty(msg) {
+  wsTabsEl.innerHTML = '';
+  wsTreeEl.innerHTML = `<div class="ws-empty">${escapeHtml(msg)}</div>`;
+}
+
+function renderWsTabs() {
+  const conv = getCurrentConversation();
+  if (!conv) { renderWsEmpty('No chat'); return; }
+  ensureWsState(conv);
+  const roots = workspaceRoots();
+  if (roots.length === 0) { renderWsEmpty('No project selected'); return; }
+  if (!conv.activeWsTab || !roots.includes(conv.activeWsTab)) {
+    conv.activeWsTab = roots[0];
+  }
+  wsTabsEl.innerHTML = '';
+  for (const r of roots) {
+    const tab = document.createElement('button');
+    tab.className = 'ws-tab' + (r === conv.activeWsTab ? ' active' : '');
+    tab.type = 'button';
+    tab.title = r;
+    tab.textContent = basename(r);
+    tab.addEventListener('click', () => {
+      const c = getCurrentConversation();
+      if (!c) return;
+      c.activeWsTab = r;
+      saveState();
+      renderWsTabs();
+      renderWsTree();
+    });
+    wsTabsEl.appendChild(tab);
+  }
+}
+
+async function renderWsTree() {
+  const conv = getCurrentConversation();
+  if (!conv) { wsTreeEl.innerHTML = ''; return; }
+  ensureWsState(conv);
+  const root = conv.activeWsTab;
+  if (!root) { wsTreeEl.innerHTML = '<div class="ws-empty">No project selected</div>'; return; }
+
+  wsTreeEl.innerHTML = '';
+  const rootUl = document.createElement('ul');
+  rootUl.className = 'ws-tree-list';
+  wsTreeEl.appendChild(rootUl);
+  await mountTreeChildren(rootUl, root, 0);
+}
+
+async function mountTreeChildren(ulEl, dirPath, depth) {
+  const conv = getCurrentConversation();
+  if (!conv) return;
+  const roots = workspaceRoots();
+  let entries;
+  try {
+    entries = await window.files.listDir(roots, dirPath);
+  } catch (e) {
+    const err = document.createElement('li');
+    err.className = 'ws-tree-error';
+    err.textContent = `Cannot read: ${e.message || e}`;
+    ulEl.appendChild(err);
+    return;
+  }
+  if (entries.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'ws-tree-empty';
+    empty.textContent = '(empty)';
+    empty.style.paddingLeft = `${12 + depth * 14}px`;
+    ulEl.appendChild(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const li = document.createElement('li');
+    li.className = 'ws-tree-node' + (entry.isDir ? ' is-dir' : ' is-file');
+    const row = document.createElement('div');
+    row.className = 'ws-tree-row';
+    row.style.paddingLeft = `${6 + depth * 14}px`;
+    row.title = entry.path;
+
+    const chevron = document.createElement('span');
+    chevron.className = 'ws-tree-chevron';
+    chevron.innerHTML = entry.isDir
+      ? `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`
+      : '';
+
+    const icon = document.createElement('span');
+    icon.className = 'ws-tree-icon';
+    icon.innerHTML = entry.isDir
+      ? `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`
+      : `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`;
+
+    const label = document.createElement('span');
+    label.className = 'ws-tree-label';
+    label.textContent = entry.name;
+
+    row.appendChild(chevron);
+    row.appendChild(icon);
+    row.appendChild(label);
+    li.appendChild(row);
+
+    if (entry.isDir) {
+      const childUl = document.createElement('ul');
+      childUl.className = 'ws-tree-list';
+      li.appendChild(childUl);
+      const expanded = !!conv.expandedDirs[entry.path];
+      if (expanded) {
+        li.classList.add('expanded');
+        mountTreeChildren(childUl, entry.path, depth + 1);
+      }
+      row.addEventListener('click', async () => {
+        const c = getCurrentConversation();
+        if (!c) return;
+        const isOpen = li.classList.toggle('expanded');
+        if (isOpen) {
+          c.expandedDirs[entry.path] = true;
+          if (!childUl.hasChildNodes()) {
+            await mountTreeChildren(childUl, entry.path, depth + 1);
+          }
+        } else {
+          delete c.expandedDirs[entry.path];
+          childUl.innerHTML = '';
+        }
+        saveState();
+      });
+    } else {
+      row.addEventListener('click', () => openFile(entry.path));
+    }
+
+    ulEl.appendChild(li);
+  }
+}
+
+function findPane(filePath) {
+  return wsTilesEl.querySelector(`.ws-pane[data-path="${cssEscape(filePath)}"]`);
+}
+
+function cssEscape(s) {
+  return String(s).replace(/["\\]/g, '\\$&');
+}
+
+function pulseHeader(pane) {
+  const header = pane.querySelector('.ws-pane-header');
+  if (!header) return;
+  header.classList.remove('pulse');
+  // restart animation
+  void header.offsetWidth;
+  header.classList.add('pulse');
+}
+
+async function openFile(filePath, opts = {}) {
+  const conv = getCurrentConversation();
+  if (!conv) return;
+  ensureWsState(conv);
+  const roots = workspaceRoots();
+  if (roots.length === 0) return;
+  if (!state.workspaceOpen) {
+    state.workspaceOpen = true;
+    applyWorkspaceVisibility();
+    saveState();
+  }
+
+  const existing = findPane(filePath);
+  if (existing) {
+    pulseHeader(existing);
+    await refreshPaneBody(existing, filePath);
+    existing.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+    return;
+  }
+
+  let width = 420;
+  const stored = conv.openFiles.find(f => f.path === filePath);
+  if (stored && typeof stored.width === 'number') width = stored.width;
+
+  const pane = document.createElement('div');
+  pane.className = 'ws-pane';
+  pane.dataset.path = filePath;
+  pane.style.width = `${width}px`;
+
+  const header = document.createElement('div');
+  header.className = 'ws-pane-header';
+  const title = document.createElement('div');
+  title.className = 'ws-pane-title';
+  const name = document.createElement('span');
+  name.className = 'ws-pane-name';
+  name.textContent = basename(filePath);
+  const dir = document.createElement('span');
+  dir.className = 'ws-pane-dir';
+  dir.textContent = ' · ' + relativeToRoot(filePath, roots);
+  title.appendChild(name);
+  title.appendChild(dir);
+  title.title = filePath;
+
+  const close = document.createElement('button');
+  close.className = 'ws-pane-close';
+  close.type = 'button';
+  close.title = 'Close';
+  close.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>`;
+  close.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeFile(filePath);
+  });
+
+  header.appendChild(title);
+  header.appendChild(close);
+
+  const body = document.createElement('div');
+  body.className = 'ws-pane-body';
+  body.innerHTML = '<div class="ws-pane-loading">Loading…</div>';
+
+  const resize = document.createElement('div');
+  resize.className = 'ws-pane-resize';
+
+  pane.appendChild(header);
+  pane.appendChild(body);
+  pane.appendChild(resize);
+
+  wsTilesEl.appendChild(pane);
+  setupPaneResize(pane, resize);
+
+  if (!stored) {
+    conv.openFiles.push({ path: filePath, width });
+    saveState();
+  }
+
+  await refreshPaneBody(pane, filePath);
+  if (opts.pulse) pulseHeader(pane);
+  if (!opts.silent) {
+    wsTilesEl.scrollTo({ left: wsTilesEl.scrollWidth, behavior: 'smooth' });
+  }
+}
+
+async function refreshPaneBody(pane, filePath) {
+  const body = pane.querySelector('.ws-pane-body');
+  const roots = workspaceRoots();
+  try {
+    const res = await window.files.readFile(roots, filePath);
+    if (res.tooLarge) {
+      body.innerHTML = `<div class="ws-pane-notice">File too large to preview (${formatBytes(res.size)})</div>`;
+      return;
+    }
+    if (res.binary) {
+      body.innerHTML = `<div class="ws-pane-notice">Binary file (${formatBytes(res.size)})</div>`;
+      return;
+    }
+    const hl = window.libs.highlightCode(res.content, res.lang || '');
+    body.innerHTML = `<pre><code class="hljs language-${hl.language || ''}">${hl.html}</code></pre>`;
+  } catch (e) {
+    body.innerHTML = `<div class="ws-pane-notice error">${escapeHtml(String(e.message || e))}</div>`;
+  }
+}
+
+function closeFile(filePath) {
+  const conv = getCurrentConversation();
+  const pane = findPane(filePath);
+  if (pane) pane.remove();
+  if (conv) {
+    conv.openFiles = (conv.openFiles || []).filter(f => f.path !== filePath);
+    saveState();
+  }
+}
+
+function relativeToRoot(filePath, roots) {
+  for (const r of roots) {
+    if (!r) continue;
+    if (filePath === r) return basename(filePath);
+    if (filePath.startsWith(r + '/')) {
+      return filePath.slice(r.length + 1).split('/').slice(0, -1).join('/') || basename(r);
+    }
+  }
+  return '';
+}
+
+function formatBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function setupPaneResize(pane, handle) {
+  let startX = 0, startW = 0, dragging = false;
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startW = pane.getBoundingClientRect().width;
+    document.body.classList.add('ws-resizing-col');
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const next = Math.max(260, Math.min(1200, startW + (e.clientX - startX)));
+    pane.style.width = `${next}px`;
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('ws-resizing-col');
+    const conv = getCurrentConversation();
+    if (!conv) return;
+    const p = pane.dataset.path;
+    const w = pane.getBoundingClientRect().width;
+    const entry = (conv.openFiles || []).find(f => f.path === p);
+    if (entry) {
+      entry.width = Math.round(w);
+      saveState();
+    }
+  });
+}
+
+function applyPanelWidths() {
+  sidebar.style.width = `${state.sidebarWidth}px`;
+  sidebar.style.minWidth = `${state.sidebarWidth}px`;
+  workspacePanel.style.width = `${state.workspaceWidth}px`;
+}
+
+const CHAT_MIN_WIDTH = 280;
+
+function setupSideResize(handle, panel, onCommit, { min, edge }) {
+  let startX = 0, startW = 0, dragging = false;
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startW = panel.getBoundingClientRect().width;
+    document.body.classList.add('ws-resizing-col');
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const delta = edge === 'right' ? (e.clientX - startX) : (startX - e.clientX);
+    const otherPanel = panel === sidebar ? workspacePanel : sidebar;
+    const otherWidth = otherPanel.classList.contains('collapsed')
+      ? 0
+      : otherPanel.getBoundingClientRect().width;
+    const dynamicMax = Math.max(min, window.innerWidth - otherWidth - CHAT_MIN_WIDTH);
+    const next = Math.max(min, Math.min(dynamicMax, startW + delta));
+    panel.style.width = `${next}px`;
+    if (edge === 'right') panel.style.minWidth = `${next}px`;
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('ws-resizing-col');
+    onCommit(Math.round(panel.getBoundingClientRect().width));
+  });
+}
+
+function setupVerticalSplit() {
+  const treeWrap = document.querySelector('.ws-tree-wrap');
+  if (treeWrap) treeWrap.style.flexBasis = `${state.wsTreeHeight}px`;
+  let startY = 0, startH = 0, dragging = false;
+  wsVSplitter.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startH = treeWrap.getBoundingClientRect().height;
+    document.body.classList.add('ws-resizing-row');
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const panelRect = workspacePanel.getBoundingClientRect();
+    const max = panelRect.height - 140;
+    const next = Math.max(120, Math.min(max, startH + (e.clientY - startY)));
+    treeWrap.style.flexBasis = `${next}px`;
+    state.wsTreeHeight = Math.round(next);
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('ws-resizing-row');
+    saveState();
+  });
+}
+
+function restoreOpenFiles() {
+  wsTilesEl.innerHTML = '';
+  const conv = getCurrentConversation();
+  if (!conv) return;
+  ensureWsState(conv);
+  for (const entry of conv.openFiles || []) {
+    openFile(entry.path, { silent: true });
+  }
+}
+
+function extractToolFilePath(data) {
+  const i = (data && data.input) || {};
+  switch (data && data.name) {
+    case 'Read':
+    case 'Edit':
+    case 'Write':
+      return i.file_path || null;
+    case 'NotebookEdit':
+      return i.notebook_path || null;
+    default:
+      return null;
+  }
+}
+
+async function handleAgentToolUse(data) {
+  const p = extractToolFilePath(data);
+  if (!p) return;
+  const roots = workspaceRoots();
+  if (roots.length === 0) return;
+  try {
+    const info = await window.files.pathInfo(roots, p);
+    if (!info || !info.exists || info.isDir) return;
+  } catch (e) {
+    return;
+  }
+  openFile(p, { pulse: true });
+}
+
+// ===== Terminal =====
+const xtermByConv = new Map(); // convId -> { term, fit, element }
+let currentTerminalConvId = null;
+let terminalResizeRaf = null;
+
+function applyTerminalVisibility() {
+  terminalPanel.classList.toggle('collapsed', !state.terminalOpen);
+  toggleTerminalBtn.classList.toggle('active', state.terminalOpen);
+}
+
+function applyTerminalHeight() {
+  terminalPanel.style.height = `${state.terminalHeight}px`;
+}
+
+function updateTerminalLabel(conv) {
+  const suffix = conv && conv.projectPath ? ` — ${basename(conv.projectPath)}` : '';
+  terminalLabel.textContent = `Terminal${suffix}`;
+}
+
+function ensureTerminalFor(conv) {
+  if (!conv) return null;
+  let entry = xtermByConv.get(conv.id);
+  if (entry) return entry;
+
+  const monoFont = getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace';
+  const term = new Terminal({
+    fontFamily: monoFont,
+    fontSize: 12,
+    theme: {
+      background: '#000000',
+      foreground: '#f0f0f0',
+      cursor: '#00d26a',
+      cursorAccent: '#000000',
+      selectionBackground: 'rgba(0, 210, 106, 0.25)',
+    },
+    cursorBlink: true,
+    scrollback: 5000,
+    convertEol: true,
+    allowProposedApi: true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  try { term.loadAddon(new WebLinksAddon.WebLinksAddon()); } catch (e) {}
+  term.onData((data) => window.terminal.input(conv.id, data));
+
+  const element = document.createElement('div');
+  element.className = 'xterm-host';
+  element.style.width = '100%';
+  element.style.height = '100%';
+
+  entry = { term, fit, element, started: false };
+  xtermByConv.set(conv.id, entry);
+  return entry;
+}
+
+function mountTerminal() {
+  const conv = getCurrentConversation();
+  if (!conv) return;
+  const entry = ensureTerminalFor(conv);
+  if (!entry) return;
+
+  // Detach any currently mounted host from terminalBody
+  while (terminalBody.firstChild) terminalBody.removeChild(terminalBody.firstChild);
+  terminalBody.appendChild(entry.element);
+
+  if (!entry.started) {
+    entry.term.open(entry.element);
+    entry.started = true;
+  }
+  fitTerminal(entry, conv.id);
+  updateTerminalLabel(conv);
+  currentTerminalConvId = conv.id;
+
+  // Spawn PTY if not already spawned (idempotent on main side)
+  const cols = entry.term.cols;
+  const rows = entry.term.rows;
+  window.terminal.open({
+    sessionId: conv.id,
+    cwd: conv.projectPath || null,
+    cols,
+    rows,
+  });
+
+  setTimeout(() => entry.term.focus(), 50);
+}
+
+function unmountTerminal() {
+  while (terminalBody.firstChild) terminalBody.removeChild(terminalBody.firstChild);
+}
+
+function fitTerminal(entry, sessionId) {
+  if (!entry || !entry.started) return;
+  try {
+    entry.fit.fit();
+    const cols = entry.term.cols;
+    const rows = entry.term.rows;
+    if (sessionId) window.terminal.resize(sessionId, cols, rows);
+  } catch (e) {}
+}
+
+function scheduleTerminalFit() {
+  if (terminalResizeRaf) return;
+  terminalResizeRaf = requestAnimationFrame(() => {
+    terminalResizeRaf = null;
+    if (!state.terminalOpen) return;
+    const conv = getCurrentConversation();
+    if (!conv) return;
+    const entry = xtermByConv.get(conv.id);
+    if (!entry) return;
+    fitTerminal(entry, conv.id);
+  });
+}
+
+function toggleTerminal() {
+  if (state.terminalOpen) {
+    state.terminalOpen = false;
+    applyTerminalVisibility();
+    unmountTerminal();
+    saveState();
+    return;
+  }
+  let conv = getCurrentConversation();
+  if (!conv) conv = createConversation('New Chat');
+  state.terminalOpen = true;
+  applyTerminalVisibility();
+  applyTerminalHeight();
+  mountTerminal();
+  saveState();
+}
+
+function onTerminalData({ sessionId, data }) {
+  const entry = xtermByConv.get(sessionId);
+  if (entry) entry.term.write(data);
+}
+
+function onTerminalExit({ sessionId, code }) {
+  const entry = xtermByConv.get(sessionId);
+  if (entry) entry.term.write(`\r\n\x1b[33m[process exited: ${code}]\x1b[0m\r\n`);
+}
+
+function killCurrentTerminal() {
+  const conv = getCurrentConversation();
+  if (!conv) return;
+  window.terminal.kill(conv.id);
+  const entry = xtermByConv.get(conv.id);
+  if (entry) {
+    entry.term.write('\r\n\x1b[31m[killed]\x1b[0m\r\n');
+    entry.started = true;
+  }
+}
+
+function setupTerminalResize() {
+  let startY = 0, startH = 0, dragging = false;
+  terminalHandle.addEventListener('mousedown', (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startH = terminalPanel.getBoundingClientRect().height;
+    document.body.classList.add('ws-resizing-row');
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const maxH = Math.max(160, chatArea.clientHeight - 180);
+    const next = Math.max(120, Math.min(maxH, startH - (e.clientY - startY)));
+    terminalPanel.style.height = `${next}px`;
+    state.terminalHeight = Math.round(next);
+    scheduleTerminalFit();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove('ws-resizing-row');
+    saveState();
+    scheduleTerminalFit();
+  });
+}
+
+function setupTerminalAutoFit() {
+  if (typeof ResizeObserver === 'undefined') return;
+  const ro = new ResizeObserver(() => scheduleTerminalFit());
+  ro.observe(terminalBody);
+  window.addEventListener('resize', scheduleTerminalFit);
+}
+
 function init() {
   // Load state
   loadState();
@@ -660,7 +1381,43 @@ function init() {
   }
   renderConversationList();
   renderProjectPill();
+  refreshBranch();
   renderModelSelector();
+  applyPanelWidths();
+  applyWorkspaceVisibility();
+  renderWsTabs();
+  renderWsTree();
+  restoreOpenFiles();
+  setupVerticalSplit();
+  if (state.terminalOpen && !getCurrentConversation()) state.terminalOpen = false;
+  applyTerminalHeight();
+  applyTerminalVisibility();
+  setupTerminalResize();
+  setupTerminalAutoFit();
+  window.terminal.onData(onTerminalData);
+  window.terminal.onExit(onTerminalExit);
+
+  branchPill.addEventListener('click', refreshBranch);
+  window.git.onBranchChanged(({ cwd, branch }) => {
+    const conv = getCurrentConversation();
+    if (!conv || conv.projectPath !== cwd) return;
+    if (branch) {
+      branchLabel.textContent = branch;
+      branchPill.title = `Branch: ${branch} · click to refresh`;
+      branchPill.classList.remove('hidden');
+    } else {
+      branchPill.classList.add('hidden');
+    }
+  });
+  if (state.terminalOpen) mountTerminal();
+  setupSideResize(sidebarResizeEl, sidebar, (w) => {
+    state.sidebarWidth = w;
+    saveState();
+  }, { min: 180, edge: 'right' });
+  setupSideResize(workspaceResizeEl, workspacePanel, (w) => {
+    state.workspaceWidth = w;
+    saveState();
+  }, { min: 320, edge: 'left' });
 
   // IPC listeners
   window.claude.onStreamStart(() => {
@@ -671,6 +1428,7 @@ function init() {
   window.claude.onStreamEnd(handleStreamEnd);
   window.claude.onStreamError(handleStreamError);
   window.claude.onStreamClose(handleStreamClose);
+  window.claude.onToolUse(handleAgentToolUse);
 
   // Permission dialog
   let currentPermissionData = null;
@@ -756,7 +1514,11 @@ function init() {
     conv.projectPath = picked;
     saveState();
     renderProjectPill();
+    refreshBranch();
     renderConversationList();
+    renderWsTabs();
+    renderWsTree();
+    if (state.terminalOpen && currentTerminalConvId === conv.id) updateTerminalLabel(conv);
   });
 
   // Add extra context folder
@@ -771,6 +1533,8 @@ function init() {
     conv.extraDirs.push(picked);
     saveState();
     renderExtraDirs();
+    renderWsTabs();
+    renderWsTree();
   });
 
   // Save memory
@@ -811,6 +1575,12 @@ function init() {
 
   // Titlebar
   document.getElementById('btn-toggle-sidebar').addEventListener('click', () => sidebar.classList.toggle('collapsed'));
+  toggleWorkspaceBtn.addEventListener('click', toggleWorkspace);
+  toggleTerminalBtn.addEventListener('click', toggleTerminal);
+  killTerminalBtn.addEventListener('click', killCurrentTerminal);
+  closeTerminalBtn.addEventListener('click', () => {
+    if (state.terminalOpen) toggleTerminal();
+  });
 
   // Keyboard shortcuts
   document.addEventListener('keydown', (e) => {
@@ -824,9 +1594,19 @@ function init() {
       stopGeneration();
     }
     // Ctrl+B: Toggle sidebar
-    if (e.ctrlKey && e.key === 'b') {
+    if (e.ctrlKey && !e.shiftKey && e.key === 'b') {
       e.preventDefault();
       sidebar.classList.toggle('collapsed');
+    }
+    // Ctrl+Shift+B (Cmd+Shift+B on mac): Toggle workspace panel
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'B' || e.key === 'b')) {
+      e.preventDefault();
+      toggleWorkspace();
+    }
+    // Ctrl+` / Cmd+`: Toggle terminal
+    if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+      e.preventDefault();
+      toggleTerminal();
     }
   });
 

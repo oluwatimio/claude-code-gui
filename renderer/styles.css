@@ -136,7 +136,8 @@ html, body {
 }
 
 #btn-yolo,
-#btn-save-memory {
+#btn-save-memory,
+#btn-toggle-terminal {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -153,7 +154,8 @@ html, body {
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast);
 }
 #btn-yolo:hover,
-#btn-save-memory:hover {
+#btn-save-memory:hover,
+#btn-toggle-terminal:hover {
   background: var(--bg-surface);
   border-color: var(--border);
   color: var(--text-primary);
@@ -200,6 +202,7 @@ html, body {
   border-right: 1px solid var(--border-light);
   display: flex;
   flex-direction: column;
+  position: relative;
   transition: margin-left var(--transition-normal),
               min-width var(--transition-normal),
               width var(--transition-normal),
@@ -853,6 +856,36 @@ html, body {
   white-space: nowrap;
 }
 
+#branch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px 4px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  max-width: 160px;
+}
+#branch-pill:hover {
+  background: var(--bg-surface);
+  border-color: #2a2a2a;
+  color: var(--text-primary);
+}
+#branch-pill svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+#branch-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #input-wrapper {
   position: relative;
   background: var(--bg-secondary);
@@ -1253,4 +1286,449 @@ html, body {
   .suggestion-chips {
     grid-template-columns: 1fr;
   }
+}
+
+/* ===== Workspace Panel ===== */
+#workspace-panel {
+  width: 480px;
+  min-width: 320px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  overflow: hidden;
+  position: relative;
+  transition: width var(--transition-normal),
+              min-width var(--transition-normal),
+              border-left-width var(--transition-normal),
+              opacity var(--transition-normal);
+}
+
+#workspace-panel.collapsed {
+  width: 0;
+  min-width: 0;
+  border-left-width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.ws-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 8px 6px;
+  border-bottom: 1px solid var(--border-light);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+}
+
+.ws-tab {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.ws-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.ws-tab.active {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-glow);
+}
+
+.ws-tree-wrap {
+  flex: 0 0 auto;
+  min-height: 120px;
+  overflow: auto;
+  padding: 4px 0;
+}
+
+.ws-tree {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.ws-tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ws-tree-node {
+  list-style: none;
+}
+
+.ws-tree-node > .ws-tree-list {
+  display: none;
+}
+
+.ws-tree-node.expanded > .ws-tree-list {
+  display: block;
+}
+
+.ws-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-tree-row:hover {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+
+.ws-tree-chevron {
+  width: 12px;
+  display: inline-flex;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+
+.ws-tree-node.is-dir.expanded > .ws-tree-row > .ws-tree-chevron {
+  transform: rotate(90deg);
+}
+
+.ws-tree-icon {
+  display: inline-flex;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.ws-tree-node.is-dir > .ws-tree-row > .ws-tree-icon {
+  color: var(--accent-dim);
+}
+
+.ws-tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-tree-empty,
+.ws-tree-error,
+.ws-empty {
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.ws-tree-error {
+  color: var(--error-red);
+  font-style: normal;
+}
+
+.ws-vsplitter {
+  height: 4px;
+  cursor: ns-resize;
+  background: var(--border-light);
+  flex-shrink: 0;
+  transition: background var(--transition-fast);
+}
+
+.ws-vsplitter:hover,
+body.ws-resizing-row .ws-vsplitter {
+  background: var(--accent);
+}
+
+.ws-tiles {
+  flex: 1 1 auto;
+  min-height: 140px;
+  display: flex;
+  flex-direction: row;
+  overflow-x: auto;
+  overflow-y: hidden;
+  gap: 1px;
+  background: var(--border-light);
+}
+
+.ws-tiles:empty::before {
+  content: "Click a file in the tree, or let Claude read/edit to see files here.";
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  padding: 16px;
+  margin: auto;
+  text-align: center;
+  background: var(--bg-primary);
+}
+
+.ws-pane {
+  flex: 0 0 auto;
+  width: 420px;
+  min-width: 260px;
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.ws-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-secondary);
+  font-size: 12px;
+  flex-shrink: 0;
+  min-height: 28px;
+}
+
+.ws-pane-header.pulse {
+  animation: ws-pulse 1.2s ease-out 1;
+}
+
+@keyframes ws-pulse {
+  0% { background: var(--accent-glow-strong); }
+  100% { background: var(--bg-secondary); }
+}
+
+.ws-pane-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-pane-name {
+  color: var(--text-primary);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-pane-dir {
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-pane-close {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.ws-pane-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+.ws-pane-body {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg-primary);
+}
+
+.ws-pane-body pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.ws-pane-body code.hljs {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+}
+
+.ws-pane-loading,
+.ws-pane-notice {
+  padding: 12px 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+}
+
+.ws-pane-notice.error {
+  color: var(--error-red);
+  font-style: normal;
+}
+
+.ws-pane-resize {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: ew-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+  z-index: 1;
+}
+
+.ws-pane-resize:hover,
+body.ws-resizing-col .ws-pane-resize {
+  background: var(--accent);
+}
+
+body.ws-resizing-col,
+body.ws-resizing-row {
+  user-select: none;
+  cursor: grabbing;
+}
+
+#btn-toggle-workspace.active {
+  color: var(--accent);
+}
+
+/* ===== Terminal Panel ===== */
+#terminal-panel {
+  height: 240px;
+  flex-shrink: 0;
+  background: #000;
+  border-top: 1px solid var(--border-light);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+#terminal-panel.collapsed {
+  display: none;
+}
+
+#terminal-resize-handle {
+  height: 4px;
+  cursor: ns-resize;
+  background: var(--border-light);
+  flex-shrink: 0;
+  transition: background var(--transition-fast);
+}
+
+#terminal-resize-handle:hover,
+body.ws-resizing-row #terminal-resize-handle {
+  background: var(--accent);
+}
+
+#terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-light);
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-height: 24px;
+}
+
+.terminal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.terminal-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.terminal-actions button {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.terminal-actions button:hover {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+}
+
+#terminal-body {
+  flex: 1;
+  overflow: hidden;
+  padding: 4px 0 0 6px;
+  background: #000;
+  min-height: 0;
+}
+
+#terminal-body .terminal.xterm {
+  height: 100%;
+  padding: 0;
+}
+
+#btn-toggle-terminal.active {
+  color: var(--accent);
+}
+
+.side-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  right: -2px;
+  cursor: ew-resize;
+  background: transparent;
+  z-index: 10;
+  transition: background var(--transition-fast);
+}
+
+.side-resize.side-resize-left {
+  right: auto;
+  left: -2px;
+}
+
+.side-resize:hover,
+body.ws-resizing-col .side-resize {
+  background: var(--accent);
+}
+
+#sidebar.collapsed .side-resize,
+#workspace-panel.collapsed .side-resize {
+  pointer-events: none;
+  opacity: 0;
 }

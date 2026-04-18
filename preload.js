@@ -56,6 +56,22 @@ contextBridge.exposeInMainWorld('libs', {
       processedText += '\n```';
     }
     return marked.parse(processedText);
+  },
+  highlightCode: (code, language) => {
+    const text = code || '';
+    try {
+      if (language && hljs.getLanguage(language)) {
+        return { html: hljs.highlight(text, { language }).value, language };
+      }
+      const auto = hljs.highlightAuto(text);
+      return { html: auto.value, language: auto.language || '' };
+    } catch (e) {
+      const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return { html: escaped, language: '' };
+    }
   }
 });
 
@@ -89,5 +105,28 @@ contextBridge.exposeInMainWorld('shellAPI', {
 
 contextBridge.exposeInMainWorld('project', {
   pick: () => ipcRenderer.invoke('project:pick'),
+});
+
+contextBridge.exposeInMainWorld('files', {
+  listDir: (roots, dirPath) => ipcRenderer.invoke('fs:list-dir', roots, dirPath),
+  readFile: (roots, filePath) => ipcRenderer.invoke('fs:read-file', roots, filePath),
+  pathInfo: (roots, p) => ipcRenderer.invoke('fs:path-info', roots, p),
+});
+
+contextBridge.exposeInMainWorld('git', {
+  branch: (cwd) => ipcRenderer.invoke('git:branch', cwd),
+  watch: (cwd) => ipcRenderer.send('git:watch', { cwd }),
+  unwatch: (cwd) => ipcRenderer.send('git:unwatch', { cwd }),
+  onBranchChanged: (cb) => ipcRenderer.on('git:branch-changed', (_, p) => cb(p)),
+});
+
+contextBridge.exposeInMainWorld('terminal', {
+  open: (params) => ipcRenderer.send('terminal:open', params),
+  input: (sessionId, data) => ipcRenderer.send('terminal:input', { sessionId, data }),
+  resize: (sessionId, cols, rows) => ipcRenderer.send('terminal:resize', { sessionId, cols, rows }),
+  kill: (sessionId) => ipcRenderer.send('terminal:kill', { sessionId }),
+  exists: (sessionId) => ipcRenderer.invoke('terminal:exists', { sessionId }),
+  onData: (cb) => ipcRenderer.on('terminal:data', (_, payload) => cb(payload)),
+  onExit: (cb) => ipcRenderer.on('terminal:exit', (_, payload) => cb(payload)),
 });
 
