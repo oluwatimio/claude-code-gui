@@ -153,6 +153,64 @@ test('processStreamEvent: tool_use block -> tool-use', () => {
   assert.deepEqual(out[0].payload.input, { file_path: '/x' });
 });
 
+test('processStreamEvent: tool_use includes block id for later result matching', () => {
+  const out = processStreamEvent({
+    type: 'assistant',
+    message: {
+      content: [{ type: 'tool_use', id: 'toolu_123', name: 'Bash', input: { command: 'ls' } }],
+    },
+  });
+  assert.equal(out[0].payload.id, 'toolu_123');
+});
+
+test('processStreamEvent: user message tool_result (string content) -> tool-result', () => {
+  const out = processStreamEvent({
+    type: 'user',
+    message: {
+      content: [
+        { type: 'tool_result', tool_use_id: 'toolu_123', content: 'hello\nworld', is_error: false },
+      ],
+    },
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].channel, 'claude:tool-result');
+  assert.equal(out[0].payload.id, 'toolu_123');
+  assert.equal(out[0].payload.text, 'hello\nworld');
+  assert.equal(out[0].payload.isError, false);
+});
+
+test('processStreamEvent: tool_result (array content) joins text parts', () => {
+  const out = processStreamEvent({
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_abc',
+          content: [
+            { type: 'text', text: 'line1' },
+            { type: 'text', text: 'line2' },
+          ],
+        },
+      ],
+    },
+  });
+  assert.equal(out[0].channel, 'claude:tool-result');
+  assert.equal(out[0].payload.text, 'line1\nline2');
+});
+
+test('processStreamEvent: tool_result is_error surfaces as payload.isError', () => {
+  const out = processStreamEvent({
+    type: 'user',
+    message: {
+      content: [
+        { type: 'tool_result', tool_use_id: 't1', content: 'boom', is_error: true },
+      ],
+    },
+  });
+  assert.equal(out[0].payload.isError, true);
+});
+
 test('processStreamEvent: multiple blocks produce multiple events in order', () => {
   const out = processStreamEvent({
     type: 'assistant',
@@ -220,6 +278,60 @@ test('processStreamEvent: unknown event types yield nothing', () => {
   assert.deepEqual(processStreamEvent(null), []);
   assert.deepEqual(processStreamEvent(undefined), []);
   assert.deepEqual(processStreamEvent('not an object'), []);
+});
+
+test('processStreamEvent: assistant message usage -> usage event (emitted before content)', () => {
+  const out = processStreamEvent({
+    type: 'assistant',
+    message: {
+      model: 'claude-opus-4-7',
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 20,
+        cache_creation_input_tokens: 500,
+        cache_read_input_tokens: 120000,
+      },
+      content: [{ type: 'text', text: 'hi' }],
+    },
+  });
+  // usage must come before the text delta so the bar updates first
+  assert.equal(out[0].channel, 'claude:usage');
+  assert.equal(out[0].payload.inputTokens, 1000);
+  assert.equal(out[0].payload.cacheReadTokens, 120000);
+  assert.equal(out[0].payload.model, 'claude-opus-4-7');
+  assert.equal(out[1].channel, 'claude:stream-delta');
+});
+
+test('processStreamEvent: assistant without usage does not emit usage', () => {
+  const out = processStreamEvent({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'hi' }] },
+  });
+  assert.equal(out.some(e => e.channel === 'claude:usage'), false);
+});
+
+test('processStreamEvent: system compact_boundary -> compact event', () => {
+  const out = processStreamEvent({
+    type: 'system',
+    subtype: 'compact_boundary',
+    compact_metadata: { trigger: 'auto', pre_tokens: 180000, post_tokens: 42000 },
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].channel, 'claude:compact');
+  assert.equal(out[0].payload.trigger, 'auto');
+  assert.equal(out[0].payload.preTokens, 180000);
+  assert.equal(out[0].payload.postTokens, 42000);
+});
+
+test('processStreamEvent: system event with compact_metadata alone is forwarded', () => {
+  const out = processStreamEvent({
+    type: 'system',
+    subtype: 'something_new',
+    compact_metadata: { trigger: 'manual' },
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].channel, 'claude:compact');
+  assert.equal(out[0].payload.trigger, 'manual');
 });
 
 test('processStreamEvent: empty text/thinking blocks are skipped', () => {

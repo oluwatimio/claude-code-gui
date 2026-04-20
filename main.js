@@ -944,6 +944,13 @@ function processStreamEvent(event, convId, obj) {
   }
 }
 
+ipcMain.on('window:focus', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
+
 ipcMain.on('claude:stop-generation', (_, payload) => {
   const convId = (payload && payload.convId) || null;
   if (!convId) return;

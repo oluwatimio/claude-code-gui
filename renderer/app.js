@@ -26,6 +26,17 @@ function isCurrentConv(convId) {
   return convId && convId === state.currentConversationId;
 }
 
+// Sync input/send/stop button state from the CURRENT conversation's streaming flag.
+// Prevents bug: one chat streaming used to leave input disabled when switching to
+// a non-streaming chat.
+function updateInputControlsForCurrent() {
+  const conv = getCurrentConversation();
+  const streaming = !!(conv && conv.streaming);
+  inputEl.disabled = streaming;
+  sendBtn.classList.toggle('hidden', streaming);
+  stopBtn.classList.toggle('hidden', !streaming);
+}
+
 function effectiveProjectPath(conv) {
   if (!conv) return null;
   return conv.worktreePath || conv.projectPath || null;
@@ -39,6 +50,9 @@ const sendBtn = document.getElementById('send-btn');
 const stopBtn = document.getElementById('stop-btn');
 const statusText = document.getElementById('status-text');
 const costDisplay = document.getElementById('cost-display');
+const contextUsageEl = document.getElementById('context-usage');
+const contextUsageFillEl = contextUsageEl ? contextUsageEl.querySelector('.context-usage-fill') : null;
+const contextUsageLabelEl = contextUsageEl ? contextUsageEl.querySelector('.context-usage-label') : null;
 const newChatBtn = document.getElementById('new-chat-btn');
 const conversationList = document.getElementById('conversation-list');
 const toggleSidebarBtn = document.getElementById('toggle-sidebar-btn');
@@ -462,7 +476,7 @@ function renderFilesAccessedBlock(msgEl, filesAccessed) {
   }
 }
 
-function createMessageEl(role, content, isStreaming = false, thinking = '', attachments = null, filesAccessed = null) {
+function createMessageEl(role, content, isStreaming = false, thinking = '', attachments = null, filesAccessed = null, toolCalls = null) {
   const msg = document.createElement('div');
   msg.className = `message message-${role}`;
 
@@ -520,6 +534,24 @@ function createMessageEl(role, content, isStreaming = false, thinking = '', atta
   if (role === 'assistant' && thinking) {
     msg.appendChild(createThinkingBlock(thinking, false));
   }
+  if (role === 'assistant' && Array.isArray(toolCalls) && toolCalls.length) {
+    const block = createToolCallsBlock(toolCalls, isStreaming);
+    // For finished turns, auto-collapse cleanly-resolved entries.
+    if (!isStreaming) {
+      const entries = block.querySelectorAll('.tool-call');
+      let hasKept = false;
+      for (const entry of entries) {
+        const status = entry.dataset.status || 'done';
+        if (status === 'done' || status === 'canceled' || status === 'unknown') {
+          entry.classList.remove('expanded');
+        } else {
+          hasKept = true;
+        }
+      }
+      if (!hasKept && entries.length > 0) block.classList.remove('expanded');
+    }
+    msg.appendChild(block);
+  }
   msg.appendChild(body);
   if (role === 'assistant' && Array.isArray(filesAccessed) && filesAccessed.length) {
     msg.appendChild(createFilesAccessedBlock(filesAccessed, false));
@@ -555,6 +587,7 @@ function createConversation(title) {
     streaming: false,
     streamContent: '',
     streamThinking: '',
+    streamToolCalls: [],
     worktreePath: null,
     worktreeBranch: null,
     pendingNewSession: false,
@@ -579,28 +612,27 @@ function switchConversation(id) {
   // Re-render messages
   messagesEl.innerHTML = '';
   for (const msg of conv.messages) {
-    messagesEl.appendChild(createMessageEl(msg.role, msg.content, false, msg.thinking || '', msg.attachments || null, msg.filesAccessed || null));
+    if (msg.role === 'compact') {
+      messagesEl.appendChild(createCompactBannerEl(msg));
+      continue;
+    }
+    messagesEl.appendChild(createMessageEl(msg.role, msg.content, false, msg.thinking || '', msg.attachments || null, msg.filesAccessed || null, msg.toolCalls || null));
   }
 
   // If this conversation is streaming, rebuild the live placeholder with accumulated content
   if (conv.streaming) {
-    const el = createMessageEl('assistant', conv.streamContent || '', true, conv.streamThinking || '', null, conv.streamFilesAccessed || null);
+    const el = createMessageEl('assistant', conv.streamContent || '', true, conv.streamThinking || '', null, conv.streamFilesAccessed || null, conv.streamToolCalls || null);
     if (conv.streamThinking) {
       const think = el.querySelector(':scope > .thinking-block');
       if (think) think.classList.add('expanded');
     }
     messagesEl.appendChild(el);
     assistantElByConv.set(conv.id, el);
-    inputEl.disabled = true;
-    sendBtn.classList.add('hidden');
-    stopBtn.classList.remove('hidden');
     setStatus('streaming', 'Generating...');
   } else {
-    inputEl.disabled = false;
-    sendBtn.classList.remove('hidden');
-    stopBtn.classList.add('hidden');
     setStatus('ready', 'Ready');
   }
+  updateInputControlsForCurrent();
 
   if (conv.messages.length > 0 || conv.streaming) {
     welcomeEl.classList.add('hidden');
@@ -615,6 +647,7 @@ function switchConversation(id) {
   renderProjectPill();
   refreshBranch();
   renderModelSelector();
+  renderContextUsage();
   renderWsTabs();
   renderWsTree();
   restoreOpenFiles();
@@ -715,6 +748,9 @@ function newChat() {
   welcomeEl.classList.remove('hidden');
   inputEl.value = '';
   autoResize();
+  updateInputControlsForCurrent();
+  setStatus('ready', 'Ready');
+  renderContextUsage();
   renderConversationList();
   renderProjectPill();
   refreshBranch();
@@ -792,6 +828,7 @@ function loadState() {
         conv.streamContent = '';
         conv.streamThinking = '';
         conv.streamFilesAccessed = [];
+        conv.streamToolCalls = [];
         if (conv.worktreePath === undefined) conv.worktreePath = null;
         if (conv.worktreeBranch === undefined) conv.worktreeBranch = null;
       }
@@ -842,6 +879,7 @@ function sendMessage(prompt) {
   conv.streamContent = '';
   conv.streamThinking = '';
   conv.streamFilesAccessed = [];
+  conv.streamToolCalls = [];
 
   const assistantEl = createMessageEl('assistant', '', true);
   messagesEl.appendChild(assistantEl);
@@ -850,9 +888,7 @@ function sendMessage(prompt) {
 
   inputEl.value = '';
   autoResize();
-  inputEl.disabled = true;
-  sendBtn.classList.add('hidden');
-  stopBtn.classList.remove('hidden');
+  updateInputControlsForCurrent();
   setStatus('streaming', 'Thinking...');
 
   const isFirstMessage = sessionLogic.shouldStartFreshSession(conv);
@@ -927,43 +963,99 @@ function finalizeStream(convId, { save = true } = {}) {
   }
 
   const filesAccessed = Array.isArray(conv.streamFilesAccessed) ? conv.streamFilesAccessed.slice() : [];
-  if (save && (conv.streamContent || conv.streamThinking)) {
+  const toolCalls = Array.isArray(conv.streamToolCalls) ? conv.streamToolCalls.slice() : [];
+  // Freeze any lingering 'running' states when we stop/save — the stream is over.
+  for (const tc of toolCalls) {
+    if (tc.status === 'running') tc.status = save ? 'unknown' : 'canceled';
+  }
+  const shouldPush = (save && (conv.streamContent || conv.streamThinking || toolCalls.length)) ||
+                     (!save && conv.streamContent);
+  if (shouldPush) {
     const m = {
       role: 'assistant',
       content: conv.streamContent || '',
-      thinking: conv.streamThinking || ''
+      thinking: conv.streamThinking || '',
     };
     if (filesAccessed.length) m.filesAccessed = filesAccessed;
+    if (toolCalls.length) m.toolCalls = toolCalls;
     conv.messages.push(m);
-  } else if (!save && conv.streamContent) {
-    const m = {
-      role: 'assistant',
-      content: conv.streamContent,
-      thinking: conv.streamThinking || ''
-    };
-    if (filesAccessed.length) m.filesAccessed = filesAccessed;
-    conv.messages.push(m);
+  }
+
+  // Finalize any streaming tool-call block UI (stop spinners, collapse cleanly-resolved entries)
+  if (el) {
+    const block = el.querySelector(':scope > .tool-calls-block');
+    if (block) {
+      block.classList.remove('tool-calls-streaming');
+      const entries = block.querySelectorAll('.tool-call');
+      let hasKept = false;
+      for (const entry of entries) {
+        const status = entry.dataset.status || 'done';
+        // Keep errors and still-running expanded — they're the interesting ones.
+        if (status === 'done' || status === 'canceled' || status === 'unknown') {
+          entry.classList.remove('expanded');
+        } else {
+          hasKept = true;
+        }
+      }
+      // If every entry is cleanly resolved, collapse the outer block too — the chat
+      // summary is what the user usually cares about after the fact.
+      if (!hasKept && entries.length > 0) {
+        block.classList.remove('expanded');
+      }
+    }
   }
 
   conv.streaming = false;
   conv.streamContent = '';
   conv.streamThinking = '';
   conv.streamFilesAccessed = [];
+  conv.streamToolCalls = [];
   assistantElByConv.delete(convId);
   saveState();
 
   if (isCurrentConv(convId)) {
-    inputEl.disabled = false;
-    sendBtn.classList.remove('hidden');
-    stopBtn.classList.add('hidden');
+    updateInputControlsForCurrent();
     inputEl.focus();
   }
   renderConversationList();
 }
 
+function shouldNotifyFor(convId) {
+  // Notify if the user isn't actively watching that specific chat right now.
+  if (!isCurrentConv(convId)) return true;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return true;
+  return false;
+}
+
+function notifyChatFinished(convId, { kind = 'done', detail = '' } = {}) {
+  if (!shouldNotifyFor(convId)) return;
+  if (typeof Notification === 'undefined') return;
+  const conv = getConversation(convId);
+  const title = conv?.title || 'Chat';
+  const body = kind === 'error'
+    ? (detail ? `Error: ${detail}` : 'Error')
+    : (detail || 'Ready');
+  try {
+    const n = new Notification(title, { body, tag: convId, silent: false });
+    n.onclick = () => {
+      try { window.claude.focusWindow(); } catch (e) {}
+      if (getConversation(convId)) switchConversation(convId);
+      n.close();
+    };
+  } catch (e) {}
+}
+
 function handleStreamEnd(data) {
   if (!data || !data.convId) return;
   finalizeStream(data.convId, { save: true });
+
+  // Fire desktop notification if the user isn't currently watching this chat
+  let detail = '';
+  if (data.cost != null) {
+    detail = `$${Number(data.cost).toFixed(4)}`;
+    if (data.duration) detail += ` · ${(data.duration / 1000).toFixed(1)}s`;
+  }
+  notifyChatFinished(data.convId, { kind: 'done', detail });
 
   if (data.cost != null && isCurrentConv(data.convId)) {
     const costStr = `$${data.cost.toFixed(4)}`;
@@ -991,16 +1083,16 @@ function handleStreamError(data) {
   conv.streaming = false;
   conv.streamContent = '';
   conv.streamThinking = '';
+  conv.streamToolCalls = [];
 
   if (isCurrentConv(convId)) {
     messagesEl.appendChild(createMessageEl('error', `Error: ${errText}`));
     scrollToBottom();
-    inputEl.disabled = false;
-    sendBtn.classList.remove('hidden');
-    stopBtn.classList.add('hidden');
+    updateInputControlsForCurrent();
     inputEl.focus();
     setStatus('error', 'Error occurred');
   }
+  notifyChatFinished(convId, { kind: 'error', detail: String(errText).slice(0, 120) });
   saveState();
   renderConversationList();
 }
@@ -1301,6 +1393,57 @@ function pulseHeader(pane) {
   header.classList.add('pulse');
 }
 
+// ===== File modal (expanded view) =====
+const fileModalOverlay = document.getElementById('file-modal-overlay');
+const fileModalNameEl = document.getElementById('file-modal-name');
+const fileModalSubtitleEl = document.getElementById('file-modal-subtitle');
+const fileModalBodyEl = document.getElementById('file-modal-body');
+const fileModalCloseBtn = document.getElementById('file-modal-close');
+
+function closeFileModal() {
+  fileModalOverlay.classList.add('hidden');
+  fileModalBodyEl.innerHTML = '';
+}
+
+async function openFileInModal(filePath) {
+  if (!filePath) return;
+  const roots = workspaceRoots();
+  fileModalNameEl.textContent = basename(filePath);
+  fileModalSubtitleEl.textContent = ' · ' + (relativeToRoot(filePath, roots) || filePath);
+  fileModalBodyEl.innerHTML = '<div class="ws-pane-loading">Loading…</div>';
+  fileModalOverlay.classList.remove('hidden');
+
+  try {
+    const res = await window.files.readFile(roots, filePath);
+    if (res.tooLarge) {
+      fileModalBodyEl.innerHTML = `<div class="ws-pane-notice">File too large to preview (${formatBytes(res.size)})</div>`;
+      return;
+    }
+    if (res.binary) {
+      fileModalBodyEl.innerHTML = `<div class="ws-pane-notice">Binary file (${formatBytes(res.size)})</div>`;
+      return;
+    }
+    const hl = window.libs.highlightCode(res.content, res.lang || '');
+    fileModalBodyEl.innerHTML = `<pre><code class="hljs language-${hl.language || ''}">${hl.html}</code></pre>`;
+  } catch (e) {
+    fileModalBodyEl.innerHTML = `<div class="ws-pane-notice error">${escapeHtml(String(e.message || e))}</div>`;
+  }
+}
+
+if (fileModalCloseBtn) {
+  fileModalCloseBtn.addEventListener('click', closeFileModal);
+}
+if (fileModalOverlay) {
+  fileModalOverlay.addEventListener('click', (e) => {
+    if (e.target === fileModalOverlay) closeFileModal();
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && fileModalOverlay && !fileModalOverlay.classList.contains('hidden')) {
+    closeFileModal();
+  }
+});
+
 async function openFile(filePath, opts = {}) {
   const conv = getCurrentConversation();
   if (!conv) return;
@@ -1344,6 +1487,16 @@ async function openFile(filePath, opts = {}) {
   title.appendChild(dir);
   title.title = filePath;
 
+  const expand = document.createElement('button');
+  expand.className = 'ws-pane-expand';
+  expand.type = 'button';
+  expand.title = 'Open in large view';
+  expand.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
+  expand.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openFileInModal(filePath);
+  });
+
   const close = document.createElement('button');
   close.className = 'ws-pane-close';
   close.type = 'button';
@@ -1355,6 +1508,7 @@ async function openFile(filePath, opts = {}) {
   });
 
   header.appendChild(title);
+  header.appendChild(expand);
   header.appendChild(close);
 
   const body = document.createElement('div');
@@ -1581,30 +1735,454 @@ function recordFileAccess(conv, path, kind) {
 }
 
 async function handleAgentToolUse(data) {
-  const access = extractToolFileAccess(data);
-  if (!access) return;
   const convId = data && data.convId;
   const conv = convId ? getConversation(convId) : getCurrentConversation();
   if (!conv) return;
 
-  recordFileAccess(conv, access.path, access.kind);
+  // Record the tool call so we can render it inline
+  recordToolCall(conv, data);
 
-  const roots = workspaceRoots(conv);
-  if (roots.length === 0) return;
-  try {
-    const info = await window.files.pathInfo(roots, access.path);
-    if (!info || !info.exists || info.isDir) return;
-  } catch (e) {
+  // Keep legacy files-accessed tracking for Read/Write/Edit
+  const access = extractToolFileAccess(data);
+  if (access) {
+    recordFileAccess(conv, access.path, access.kind);
+
+    const roots = workspaceRoots(conv);
+    if (roots.length > 0) {
+      try {
+        const info = await window.files.pathInfo(roots, access.path);
+        if (info && info.exists && !info.isDir) {
+          if (isCurrentConv(conv.id)) {
+            openFile(access.path, { pulse: true });
+          } else {
+            ensureWsState(conv);
+            if (!(conv.openFiles || []).some(f => (typeof f === 'string' ? f : f.path) === access.path)) {
+              conv.openFiles.push({ path: access.path, width: 420 });
+            }
+            saveState();
+          }
+        }
+      } catch (e) {}
+    }
+  }
+}
+
+function contextWindowFor(modelId) {
+  const m = String(modelId || '');
+  if (!m) return 200_000;
+  // 1M-context variants carry [1m] in the id
+  if (/\[1m\]/i.test(m) || /-1m\b/i.test(m)) return 1_000_000;
+  return 200_000;
+}
+
+function handleUsage(data) {
+  if (!data || !data.convId) return;
+  const conv = getConversation(data.convId);
+  if (!conv) return;
+  // Usage.input_tokens + cache_read + cache_creation approximates the full
+  // prompt we just sent — i.e. current context occupancy.
+  const occupancy = (data.inputTokens || 0)
+    + (data.cacheReadTokens || 0)
+    + (data.cacheCreationTokens || 0);
+  conv.contextTokens = occupancy;
+  conv.contextModel = data.model || conv.model || null;
+  if (isCurrentConv(conv.id)) renderContextUsage();
+}
+
+function renderContextUsage() {
+  if (!contextUsageEl) return;
+  const conv = getCurrentConversation();
+  if (!conv || !conv.contextTokens) {
+    contextUsageEl.classList.add('hidden');
     return;
   }
+  const max = contextWindowFor(conv.contextModel || conv.model);
+  const pct = Math.min(100, Math.max(0, (conv.contextTokens / max) * 100));
+  contextUsageFillEl.style.width = `${pct.toFixed(1)}%`;
+  contextUsageEl.classList.remove('hidden');
+  contextUsageEl.classList.toggle('context-usage-warn', pct >= 70 && pct < 90);
+  contextUsageEl.classList.toggle('context-usage-critical', pct >= 90);
+  contextUsageLabelEl.textContent = `${Math.round(pct)}% · ${formatTokenCount(conv.contextTokens)}/${formatTokenCount(max)}`;
+  contextUsageEl.title = `Context: ${conv.contextTokens.toLocaleString()} / ${max.toLocaleString()} tokens`;
+}
+
+function handleCompact(data) {
+  if (!data || !data.convId) return;
+  const conv = getConversation(data.convId);
+  if (!conv) return;
+  const marker = {
+    role: 'compact',
+    trigger: data.trigger || '',
+    preTokens: data.preTokens ?? null,
+    postTokens: data.postTokens ?? null,
+    message: data.message || '',
+    ts: Date.now(),
+  };
+  conv.messages.push(marker);
+  saveState();
   if (isCurrentConv(conv.id)) {
-    openFile(access.path, { pulse: true });
-  } else {
-    // Background chat: remember the file for when user switches back
-    ensureWsState(conv);
-    if (!conv.openFiles.includes(access.path)) conv.openFiles.push(access.path);
-    saveState();
+    messagesEl.appendChild(createCompactBannerEl(marker));
+    scrollToBottom();
   }
+}
+
+function createCompactBannerEl(marker) {
+  const el = document.createElement('div');
+  el.className = 'compact-banner';
+  const trigger = marker.trigger ? ` · ${marker.trigger}` : '';
+  const tokens = (marker.preTokens != null && marker.postTokens != null)
+    ? ` · ${formatTokenCount(marker.preTokens)} → ${formatTokenCount(marker.postTokens)} tokens`
+    : '';
+  el.innerHTML = `
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="4 14 10 14 10 20"/>
+      <polyline points="20 10 14 10 14 4"/>
+      <line x1="14" y1="10" x2="21" y2="3"/>
+      <line x1="3" y1="21" x2="10" y2="14"/>
+    </svg>
+    <span>Context compacted${escapeHtml(trigger)}${escapeHtml(tokens)}</span>
+  `;
+  return el;
+}
+
+function formatTokenCount(n) {
+  if (n == null) return '';
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function handleToolResult(data) {
+  if (!data || !data.convId || !data.id) return;
+  const conv = getConversation(data.convId);
+  if (!conv || !Array.isArray(conv.streamToolCalls)) return;
+  const tc = conv.streamToolCalls.find(c => c.id === data.id);
+  if (!tc) return;
+  tc.result = data.text || '';
+  tc.status = data.isError ? 'error' : 'done';
+  if (!isCurrentConv(conv.id)) return;
+  const msgEl = assistantElByConv.get(conv.id);
+  if (!msgEl) return;
+  const block = msgEl.querySelector(':scope > .tool-calls-block');
+  if (!block) return;
+  const entry = block.querySelector(`.tool-call[data-id="${cssEscape(data.id)}"]`);
+  if (entry) updateToolCallEntry(entry, tc);
+  scrollToBottom();
+}
+
+function recordToolCall(conv, data) {
+  if (!Array.isArray(conv.streamToolCalls)) conv.streamToolCalls = [];
+  const entry = {
+    id: data.id || `tc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: data.name || 'Tool',
+    input: data.input || {},
+    result: null,
+    status: 'running',
+  };
+  conv.streamToolCalls.push(entry);
+  if (!isCurrentConv(conv.id)) return;
+  const msgEl = assistantElByConv.get(conv.id);
+  if (!msgEl) return;
+  let block = msgEl.querySelector(':scope > .tool-calls-block');
+  if (!block) {
+    block = createToolCallsBlock([], true);
+    // Insert before the main text body so tool output reads chronologically before final answer.
+    const body = msgEl.querySelector('.message-body');
+    msgEl.insertBefore(block, body);
+  }
+  const bodyEl = block.querySelector('.tool-calls-body');
+  bodyEl.appendChild(createToolCallEntry(entry));
+  updateToolCallsHeader(block);
+  scrollToBottom();
+}
+
+// ===== Tool-call rendering =====
+
+function toolIconSvg(name) {
+  // Simple family-based icons
+  const fam = toolFamily(name);
+  const map = {
+    bash: '<path d="M4 17l6-6-6-6"/><path d="M12 19h8"/>',
+    read: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+    write: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+    task: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    todo: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 10l2 2 4-4"/>',
+    web: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/>',
+    tool: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.1 2.1-2.2-2.2 2.1-2.1z"/>',
+  };
+  const d = map[fam] || map.tool;
+  return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+}
+
+function toolFamily(name) {
+  const n = String(name || '');
+  if (n === 'Bash') return 'bash';
+  if (n === 'Read') return 'read';
+  if (n === 'Edit' || n === 'MultiEdit' || n === 'Write' || n === 'NotebookEdit') return 'write';
+  if (n === 'Grep' || n === 'Glob') return 'search';
+  if (n === 'Task' || n === 'Agent' || /spawn_task$/i.test(n)) return 'task';
+  if (n === 'TodoWrite') return 'todo';
+  if (n === 'WebFetch' || n === 'WebSearch') return 'web';
+  return 'tool';
+}
+
+function toolSummaryText(name, input) {
+  const i = input || {};
+  switch (name) {
+    case 'Bash': {
+      const cmd = (i.command || '').trim();
+      const first = cmd.split('\n')[0];
+      return first.length > 200 ? first.slice(0, 197) + '…' : first;
+    }
+    case 'Read':
+    case 'Edit':
+    case 'MultiEdit':
+    case 'Write':
+      return basename(i.file_path || '') + (i.file_path ? '' : '');
+    case 'NotebookEdit':
+      return basename(i.notebook_path || '');
+    case 'Grep':
+      return i.pattern ? `"${i.pattern}"` + (i.glob ? ` · ${i.glob}` : '') : '';
+    case 'Glob':
+      return i.pattern || '';
+    case 'Task':
+    case 'Agent':
+      return (i.description || i.subagent_type || '').toString();
+    case 'TodoWrite':
+      if (Array.isArray(i.todos)) {
+        const total = i.todos.length;
+        const done = i.todos.filter(t => t.status === 'completed').length;
+        return `${done}/${total} complete`;
+      }
+      return '';
+    case 'WebFetch':
+      return i.url || '';
+    case 'WebSearch':
+      return i.query || '';
+    default:
+      try {
+        const s = JSON.stringify(i);
+        return s.length > 120 ? s.slice(0, 117) + '…' : s;
+      } catch (e) { return ''; }
+  }
+}
+
+function createToolCallsBlock(entries, isStreaming) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tool-calls-block' + (isStreaming ? ' tool-calls-streaming' : '');
+  wrap.innerHTML = `
+    <button class="tool-calls-toggle" type="button">
+      <svg class="tool-calls-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+      <span class="tool-calls-label"></span>
+    </button>
+    <div class="tool-calls-body"></div>
+  `;
+  // Start expanded so users see what Claude is doing live.
+  wrap.classList.add('expanded');
+  wrap.querySelector('.tool-calls-toggle').addEventListener('click', () => {
+    wrap.classList.toggle('expanded');
+  });
+  const bodyEl = wrap.querySelector('.tool-calls-body');
+  for (const entry of entries || []) {
+    bodyEl.appendChild(createToolCallEntry(entry));
+  }
+  updateToolCallsHeader(wrap);
+  return wrap;
+}
+
+function updateToolCallsHeader(block) {
+  if (!block) return;
+  const label = block.querySelector('.tool-calls-label');
+  if (!label) return;
+  const entries = block.querySelectorAll('.tool-call');
+  const total = entries.length;
+  const running = block.querySelectorAll('.tool-call[data-status="running"]').length;
+  const errors = block.querySelectorAll('.tool-call[data-status="error"]').length;
+  const parts = [`${total} tool call${total === 1 ? '' : 's'}`];
+  if (running) parts.push(`${running} running`);
+  if (errors) parts.push(`${errors} error${errors === 1 ? '' : 's'}`);
+  label.textContent = parts.join(' · ');
+}
+
+function createToolCallEntry(entry) {
+  const el = document.createElement('div');
+  el.className = 'tool-call';
+  el.dataset.id = entry.id;
+  el.dataset.status = entry.status || 'running';
+  el.dataset.family = toolFamily(entry.name);
+  el.innerHTML = `
+    <div class="tool-call-header">
+      <span class="tool-call-status"></span>
+      <span class="tool-call-icon">${toolIconSvg(entry.name)}</span>
+      <span class="tool-call-name"></span>
+      <span class="tool-call-summary"></span>
+      <svg class="tool-call-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 12 15 18 9"/>
+      </svg>
+    </div>
+    <div class="tool-call-body"></div>
+  `;
+  el.querySelector('.tool-call-header').addEventListener('click', () => {
+    el.classList.toggle('expanded');
+  });
+  // Auto-expand Task calls so users can watch sub-agents work
+  if (toolFamily(entry.name) === 'task') {
+    el.classList.add('expanded');
+  }
+  updateToolCallEntry(el, entry);
+  return el;
+}
+
+function updateToolCallEntry(el, entry) {
+  if (!el) return;
+  el.dataset.status = entry.status || 'running';
+  el.querySelector('.tool-call-name').textContent = entry.name;
+  const summaryEl = el.querySelector('.tool-call-summary');
+  summaryEl.textContent = toolSummaryText(entry.name, entry.input);
+  summaryEl.title = summaryEl.textContent;
+
+  const statusEl = el.querySelector('.tool-call-status');
+  const status = entry.status || 'running';
+  statusEl.className = `tool-call-status status-${status}`;
+  if (status === 'running') {
+    statusEl.innerHTML = '<span class="tc-spinner"></span>';
+  } else if (status === 'done') {
+    statusEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  } else if (status === 'error') {
+    statusEl.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>';
+  } else {
+    statusEl.innerHTML = '<span class="tc-dot"></span>';
+  }
+
+  const body = el.querySelector('.tool-call-body');
+  body.innerHTML = renderToolCallBody(entry);
+}
+
+function renderToolCallBody(entry) {
+  const name = entry.name;
+  const i = entry.input || {};
+  const fam = toolFamily(name);
+  const parts = [];
+
+  // Input section
+  if (name === 'TodoWrite' && Array.isArray(i.todos)) {
+    parts.push(renderTodoList(i.todos));
+  } else if (name === 'Bash') {
+    if (i.description) {
+      parts.push(`<div class="tc-note">${escapeHtml(i.description)}</div>`);
+    }
+    parts.push(`<pre class="tc-code tc-code-bash">${escapeHtml(i.command || '')}</pre>`);
+  } else if (fam === 'task') {
+    const meta = [];
+    if (i.subagent_type) meta.push(`<span class="tc-meta-key">agent</span> <span class="tc-meta-val">${escapeHtml(i.subagent_type)}</span>`);
+    if (i.description) meta.push(`<span class="tc-meta-key">task</span> <span class="tc-meta-val">${escapeHtml(i.description)}</span>`);
+    if (meta.length) parts.push(`<div class="tc-meta">${meta.join('')}</div>`);
+    if (i.prompt) {
+      parts.push(`<div class="tc-subhead">Prompt</div><pre class="tc-code">${escapeHtml(i.prompt)}</pre>`);
+    }
+  } else if (name === 'Read' || name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'NotebookEdit') {
+    const path = i.file_path || i.notebook_path || '';
+    if (path) parts.push(`<div class="tc-path">${escapeHtml(path)}</div>`);
+    if (name === 'Edit' && i.old_string != null && i.new_string != null) {
+      parts.push(renderUnifiedDiff(i.old_string, i.new_string));
+    } else if (name === 'MultiEdit' && Array.isArray(i.edits)) {
+      const total = i.edits.length;
+      i.edits.forEach((ed, idx) => {
+        if (!ed || ed.old_string == null || ed.new_string == null) return;
+        parts.push(`<div class="tc-subhead">edit ${idx + 1} / ${total}</div>`);
+        parts.push(renderUnifiedDiff(ed.old_string, ed.new_string));
+      });
+    } else if (name === 'Write' && i.content != null) {
+      parts.push(`<div class="tc-subhead">content</div><pre class="tc-code">${escapeHtml(String(i.content).slice(0, 4000))}${String(i.content).length > 4000 ? '\n…(truncated)' : ''}</pre>`);
+    }
+  } else if (name === 'Grep' || name === 'Glob') {
+    const kv = [];
+    for (const k of Object.keys(i)) {
+      const v = i[k];
+      if (v == null || v === '') continue;
+      kv.push(`<span class="tc-meta-key">${escapeHtml(k)}</span> <span class="tc-meta-val">${escapeHtml(String(v))}</span>`);
+    }
+    if (kv.length) parts.push(`<div class="tc-meta">${kv.join('')}</div>`);
+  } else {
+    // Generic JSON input fallback
+    try {
+      parts.push(`<pre class="tc-code">${escapeHtml(JSON.stringify(i, null, 2))}</pre>`);
+    } catch (e) {}
+  }
+
+  // Output section
+  if (entry.result != null && entry.result !== '') {
+    const isError = entry.status === 'error';
+    parts.push(`<div class="tc-subhead${isError ? ' tc-subhead-error' : ''}">output${isError ? ' (error)' : ''}</div>`);
+    const text = String(entry.result);
+    const truncated = text.length > 8000 ? text.slice(0, 8000) + '\n…(truncated)' : text;
+    const cls = name === 'Bash' ? 'tc-code tc-code-bash' : 'tc-code';
+    parts.push(`<pre class="${cls}${isError ? ' tc-output-error' : ''}">${escapeHtml(truncated)}</pre>`);
+  }
+
+  return parts.join('');
+}
+
+function renderTodoList(todos) {
+  if (!Array.isArray(todos) || !todos.length) return '';
+  const items = todos.map((t) => {
+    const status = t.status || 'pending';
+    const label = (status === 'in_progress' && t.activeForm) ? t.activeForm : (t.content || '');
+    const icon = status === 'completed'
+      ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>'
+      : status === 'in_progress'
+        ? '<span class="tc-spinner tc-spinner-sm"></span>'
+        : '<span class="todo-empty-box"></span>';
+    return `<li class="todo-item todo-${status}"><span class="todo-icon">${icon}</span><span class="todo-label">${escapeHtml(label)}</span></li>`;
+  }).join('');
+  return `<ul class="todo-list">${items}</ul>`;
+}
+
+function renderUnifiedDiff(oldText, newText) {
+  const patch = window.libs.structuredPatch(oldText || '', newText || '', 3);
+  if (!patch || !Array.isArray(patch.hunks) || patch.hunks.length === 0) {
+    return `<pre class="tc-code">${escapeHtml(String(newText || ''))}</pre>`;
+  }
+
+  const last = patch.hunks[patch.hunks.length - 1];
+  const maxLine = Math.max(last.oldStart + last.oldLines, last.newStart + last.newLines);
+  const gutterW = Math.max(2, String(maxLine).length);
+
+  const hunks = patch.hunks.map(h => {
+    const header = `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`;
+    let oldN = h.oldStart;
+    let newN = h.newStart;
+    const rows = h.lines.map(line => {
+      const sign = line.charAt(0);
+      const body = line.slice(1);
+      let cls = 'diff-ctx';
+      let oldCell = '';
+      let newCell = '';
+      if (sign === '+') {
+        cls = 'diff-add';
+        newCell = String(newN++);
+      } else if (sign === '-') {
+        cls = 'diff-del';
+        oldCell = String(oldN++);
+      } else if (sign === '\\') {
+        cls = 'diff-note';
+      } else {
+        oldCell = String(oldN++);
+        newCell = String(newN++);
+      }
+      return `<div class="diff-line ${cls}">` +
+        `<span class="diff-gutter diff-gutter-old" style="min-width:${gutterW}ch">${oldCell}</span>` +
+        `<span class="diff-gutter diff-gutter-new" style="min-width:${gutterW}ch">${newCell}</span>` +
+        `<span class="diff-sign">${sign ? escapeHtml(sign) : '\u00a0'}</span>` +
+        `<span class="diff-body">${escapeHtml(body)}</span>` +
+        `</div>`;
+    }).join('');
+    return `<div class="diff-hunk-header">${escapeHtml(header)}</div>${rows}`;
+  }).join('');
+
+  return `<div class="tc-diff-block">${hunks}</div>`;
 }
 
 // ===== Terminal =====
@@ -2651,6 +3229,9 @@ function init() {
   window.claude.onStreamError(handleStreamError);
   window.claude.onStreamClose(handleStreamClose);
   window.claude.onToolUse(handleAgentToolUse);
+  window.claude.onToolResult(handleToolResult);
+  window.claude.onCompact(handleCompact);
+  window.claude.onUsage(handleUsage);
 
   // Permission dialog
   let currentPermissionData = null;

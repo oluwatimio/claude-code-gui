@@ -193,6 +193,10 @@
         <div id="input-footer">
           <span id="status-text"></span>
           <div class="footer-right">
+            <span id="context-usage" class="context-usage hidden" title="Context window usage">
+              <span class="context-usage-bar"><span class="context-usage-fill"></span></span>
+              <span class="context-usage-label"></span>
+            </span>
             <span id="cost-display"></span>
             <button id="btn-toggle-terminal" type="button" title="Toggle terminal (Ctrl+`)">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -295,6 +299,22 @@
         <button id="confirm-cancel" class="perm-btn perm-btn-deny">Cancel</button>
         <button id="confirm-ok" class="perm-btn perm-btn-allow">Continue</button>
       </div>
+    </div>
+  </div>
+
+  <!-- File viewer modal -->
+  <div id="file-modal-overlay" class="file-modal-overlay hidden">
+    <div id="file-modal" class="file-modal">
+      <div class="file-modal-header">
+        <div class="file-modal-title">
+          <span id="file-modal-name"></span>
+          <span id="file-modal-subtitle" class="file-modal-subtitle"></span>
+        </div>
+        <button id="file-modal-close" class="file-modal-close" type="button" title="Close">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div id="file-modal-body" class="file-modal-body"></div>
     </div>
   </div>
 

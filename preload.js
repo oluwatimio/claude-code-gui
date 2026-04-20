@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const { marked } = require('marked');
 const hljs = require('highlight.js/lib/common');
+const { structuredPatch } = require('diff');
 
 // Configure marked with highlight.js integration
 marked.use({
@@ -57,6 +58,25 @@ contextBridge.exposeInMainWorld('libs', {
     }
     return marked.parse(processedText);
   },
+  structuredPatch: (oldText, newText, context) => {
+    try {
+      const patch = structuredPatch('a', 'b', String(oldText || ''), String(newText || ''), '', '', {
+        context: typeof context === 'number' ? context : 3,
+      });
+      // Return a cloneable plain object across the contextBridge
+      return {
+        hunks: (patch.hunks || []).map(h => ({
+          oldStart: h.oldStart,
+          oldLines: h.oldLines,
+          newStart: h.newStart,
+          newLines: h.newLines,
+          lines: h.lines.slice(),
+        })),
+      };
+    } catch (e) {
+      return { hunks: [] };
+    }
+  },
   highlightCode: (code, language) => {
     const text = code || '';
     try {
@@ -85,6 +105,10 @@ contextBridge.exposeInMainWorld('claude', {
   onStreamError: (callback) => ipcRenderer.on('claude:stream-error', (_, data) => callback(data)),
   onStreamClose: (callback) => ipcRenderer.on('claude:stream-close', (_, data) => callback(data)),
   onToolUse: (callback) => ipcRenderer.on('claude:tool-use', (_, data) => callback(data)),
+  onToolResult: (callback) => ipcRenderer.on('claude:tool-result', (_, data) => callback(data)),
+  onCompact: (callback) => ipcRenderer.on('claude:compact', (_, data) => callback(data)),
+  onUsage: (callback) => ipcRenderer.on('claude:usage', (_, data) => callback(data)),
+  focusWindow: () => ipcRenderer.send('window:focus'),
   onPermissionRequest: (callback) => ipcRenderer.on('permission:request', (_, data) => callback(data)),
   respondPermission: (toolUseId, decision) => ipcRenderer.send('permission:response', { toolUseId, decision }),
   removeAllListeners: () => {
@@ -95,6 +119,9 @@ contextBridge.exposeInMainWorld('claude', {
     ipcRenderer.removeAllListeners('claude:stream-error');
     ipcRenderer.removeAllListeners('claude:stream-close');
     ipcRenderer.removeAllListeners('claude:tool-use');
+    ipcRenderer.removeAllListeners('claude:tool-result');
+    ipcRenderer.removeAllListeners('claude:compact');
+    ipcRenderer.removeAllListeners('claude:usage');
     ipcRenderer.removeAllListeners('permission:request');
   }
 });
