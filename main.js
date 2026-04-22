@@ -444,6 +444,59 @@ ipcMain.handle('files:pick-attachments', async () => {
   return result.filePaths;
 });
 
+// ===== External IDE launcher =====
+// Tries the IDE's CLI first; on macOS falls back to `open -a <AppName>`
+// so JetBrains apps still work even when their `Create Command-line
+// Launcher` shim isn't installed.
+const IDE_COMMANDS = [
+  { id: 'vscode',   label: 'VS Code',        cli: 'code',          macApp: 'Visual Studio Code' },
+  { id: 'cursor',   label: 'Cursor',         cli: 'cursor',        macApp: 'Cursor' },
+  { id: 'zed',      label: 'Zed',            cli: 'zed',           macApp: 'Zed' },
+  { id: 'webstorm', label: 'WebStorm',       cli: 'webstorm',      macApp: 'WebStorm' },
+  { id: 'rubymine', label: 'RubyMine',       cli: 'rubymine',      macApp: 'RubyMine' },
+  { id: 'pycharm',  label: 'PyCharm',        cli: 'pycharm',       macApp: 'PyCharm' },
+  { id: 'idea',     label: 'IntelliJ IDEA',  cli: 'idea',          macApp: 'IntelliJ IDEA' },
+  { id: 'goland',   label: 'GoLand',         cli: 'goland',        macApp: 'GoLand' },
+  { id: 'sublime',  label: 'Sublime Text',   cli: 'subl',          macApp: 'Sublime Text' },
+];
+
+ipcMain.handle('ide:list', async () => IDE_COMMANDS.map((i) => ({ id: i.id, label: i.label })));
+
+ipcMain.handle('ide:open', async (_, { id, filePath } = {}) => {
+  const ide = IDE_COMMANDS.find((i) => i.id === id);
+  if (!ide) return { ok: false, error: 'Unknown IDE' };
+  if (!filePath) return { ok: false, error: 'No file path' };
+
+  const launch = (cmd, args) => new Promise((resolve) => {
+    try {
+      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      let settled = false;
+      child.once('error', (err) => { if (!settled) { settled = true; resolve({ ok: false, error: err.message }); } });
+      child.once('spawn', () => {
+        if (settled) return;
+        settled = true;
+        try { child.unref(); } catch (e) {}
+        resolve({ ok: true });
+      });
+      // Safety timer — if neither event fires, assume failure.
+      setTimeout(() => { if (!settled) { settled = true; resolve({ ok: false, error: 'spawn timeout' }); } }, 1500);
+    } catch (err) {
+      resolve({ ok: false, error: err && err.message ? err.message : String(err) });
+    }
+  });
+
+  // 1. Try the CLI on PATH.
+  let result = await launch(ide.cli, [filePath]);
+  if (result.ok) return result;
+  // 2. macOS: fall back to `open -a <AppName> <path>` — works as long as the app is installed.
+  if (process.platform === 'darwin' && ide.macApp) {
+    const fallback = await launch('open', ['-a', ide.macApp, filePath]);
+    if (fallback.ok) return fallback;
+    return { ok: false, error: `${ide.label} not found (tried "${ide.cli}" and "open -a ${ide.macApp}")` };
+  }
+  return { ok: false, error: `${ide.label} CLI "${ide.cli}" not found on PATH` };
+});
+
 // ===== gh CLI integration =====
 let _ghBinary = null;
 function findGhBinary() {

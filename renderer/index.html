@@ -332,9 +332,23 @@
           <span id="file-modal-name"></span>
           <span id="file-modal-subtitle" class="file-modal-subtitle"></span>
         </div>
-        <button id="file-modal-close" class="file-modal-close" type="button" title="Close">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-        </button>
+        <div id="file-modal-actions" class="file-modal-actions">
+          <div class="file-modal-ide-wrap">
+            <button id="file-modal-ide-btn" class="file-modal-ide-btn" type="button" title="Open in external editor">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                <polyline points="15 3 21 3 21 9"/>
+                <line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              <span id="file-modal-ide-label">Open in…</span>
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            <div id="file-modal-ide-menu" class="file-modal-ide-menu hidden"></div>
+          </div>
+          <button id="file-modal-close" class="file-modal-close" type="button" title="Close">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
       </div>
       <div id="file-modal-body" class="file-modal-body"></div>
     </div>

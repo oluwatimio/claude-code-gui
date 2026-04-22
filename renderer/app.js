@@ -10,6 +10,7 @@ const state = {
   prPanelWidth: 480,
   prFilter: 'mine', // 'mine' | 'all'
   prPollMinutes: 2, // 0 = off; otherwise polling cadence for CI checks on the open PR
+  preferredIde: null, // last IDE the user picked from the file modal's "Open in" menu
   terminalOpen: false,
   terminalHeight: 240,
   defaultModel: null, // last model the user picked; used as initial model for new conversations
@@ -1017,6 +1018,7 @@ function saveState() {
       prPanelWidth: state.prPanelWidth,
       prFilter: state.prFilter,
       prPollMinutes: state.prPollMinutes,
+      preferredIde: state.preferredIde,
       terminalOpen: state.terminalOpen,
       terminalHeight: state.terminalHeight,
       defaultModel: state.defaultModel,
@@ -1047,6 +1049,9 @@ function loadState() {
       }
       if (typeof data.prPollMinutes === 'number' && data.prPollMinutes >= 0 && data.prPollMinutes <= 60) {
         state.prPollMinutes = data.prPollMinutes;
+      }
+      if (typeof data.preferredIde === 'string' && data.preferredIde) {
+        state.preferredIde = data.preferredIde;
       }
       if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) {
         state.wsTreeHeight = data.wsTreeHeight;
@@ -1859,7 +1864,7 @@ function fileOpenerConfig() {
     },
     onAccept(result) {
       const absPath = `${result.root}/${result.rel}`;
-      try { openFile(absPath, { pulse: true }); } catch (e) {}
+      try { openFileInModal(absPath); } catch (e) {}
     },
   };
 }
@@ -1956,7 +1961,7 @@ function contentSearchConfig() {
     },
     onAccept(result) {
       const absPath = `${result.root}/${result.rel}`;
-      try { openFile(absPath, { pulse: true }); } catch (e) {}
+      try { openFileInModal(absPath); } catch (e) {}
     },
   };
 }
@@ -2126,19 +2131,96 @@ const fileModalNameEl = document.getElementById('file-modal-name');
 const fileModalSubtitleEl = document.getElementById('file-modal-subtitle');
 const fileModalBodyEl = document.getElementById('file-modal-body');
 const fileModalCloseBtn = document.getElementById('file-modal-close');
+const fileModalIdeBtn = document.getElementById('file-modal-ide-btn');
+const fileModalIdeLabel = document.getElementById('file-modal-ide-label');
+const fileModalIdeMenu = document.getElementById('file-modal-ide-menu');
+
+// Track the path currently in the modal so the IDE button knows what to open.
+let fileModalPath = null;
+let cachedIdeList = null;
 
 function closeFileModal() {
   fileModalOverlay.classList.add('hidden');
   fileModalBodyEl.innerHTML = '';
+  if (fileModalIdeMenu) fileModalIdeMenu.classList.add('hidden');
+  fileModalPath = null;
+}
+
+async function ensureIdeList() {
+  if (cachedIdeList) return cachedIdeList;
+  try { cachedIdeList = await window.ide.list(); }
+  catch (e) { cachedIdeList = []; }
+  return cachedIdeList;
+}
+
+function updateIdeBtnLabel() {
+  if (!fileModalIdeLabel) return;
+  const preferred = state.preferredIde;
+  if (!preferred) { fileModalIdeLabel.textContent = 'Open in…'; return; }
+  const match = (cachedIdeList || []).find((i) => i.id === preferred);
+  fileModalIdeLabel.textContent = match ? `Open in ${match.label}` : 'Open in…';
+}
+
+async function renderIdeMenu() {
+  if (!fileModalIdeMenu) return;
+  const ides = await ensureIdeList();
+  fileModalIdeMenu.innerHTML = '';
+  for (const ide of ides) {
+    const opt = document.createElement('button');
+    opt.type = 'button';
+    opt.className = 'file-modal-ide-option' + (state.preferredIde === ide.id ? ' preferred' : '');
+    opt.textContent = ide.label;
+    opt.addEventListener('click', () => {
+      state.preferredIde = ide.id;
+      saveState();
+      updateIdeBtnLabel();
+      fileModalIdeMenu.classList.add('hidden');
+      launchPreferredIde();
+    });
+    fileModalIdeMenu.appendChild(opt);
+  }
+}
+
+async function launchPreferredIde() {
+  if (!fileModalPath) return;
+  const id = state.preferredIde;
+  if (!id) { toggleIdeMenu(true); return; }
+  try {
+    const res = await window.ide.open(id, fileModalPath);
+    if (res && !res.ok) showIdeError(res.error || 'Failed to launch');
+  } catch (e) { showIdeError(e && e.message || String(e)); }
+}
+
+function showIdeError(message) {
+  const existing = document.querySelector('.file-modal-ide-error');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.className = 'file-modal-ide-error';
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => { el.remove(); }, 4200);
+}
+
+function toggleIdeMenu(force) {
+  if (!fileModalIdeMenu) return;
+  const willShow = force !== undefined ? force : fileModalIdeMenu.classList.contains('hidden');
+  if (willShow) {
+    renderIdeMenu();
+    fileModalIdeMenu.classList.remove('hidden');
+  } else {
+    fileModalIdeMenu.classList.add('hidden');
+  }
 }
 
 async function openFileInModal(filePath) {
   if (!filePath) return;
+  fileModalPath = filePath;
   const roots = workspaceRoots();
   fileModalNameEl.textContent = basename(filePath);
   fileModalSubtitleEl.textContent = ' · ' + (relativeToRoot(filePath, roots) || filePath);
   fileModalBodyEl.innerHTML = '<div class="ws-pane-loading">Loading…</div>';
   fileModalOverlay.classList.remove('hidden');
+  ensureIdeList().then(updateIdeBtnLabel);
 
   try {
     const res = await window.files.readFile(roots, filePath);
@@ -2165,8 +2247,32 @@ if (fileModalOverlay) {
     if (e.target === fileModalOverlay) closeFileModal();
   });
 }
+if (fileModalIdeBtn) {
+  fileModalIdeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Split interaction: if there's a preferred IDE, primary click launches it.
+    // The dropdown chevron (any part of the button with a modifier) opens the menu.
+    // We keep it simple here: click always opens the menu on first use, and
+    // once a preference exists clicking launches directly; hold Alt to re-open the menu.
+    if (state.preferredIde && !e.altKey) {
+      launchPreferredIde();
+    } else {
+      toggleIdeMenu();
+    }
+  });
+}
+document.addEventListener('click', (e) => {
+  if (!fileModalIdeMenu || fileModalIdeMenu.classList.contains('hidden')) return;
+  if (fileModalIdeBtn && fileModalIdeBtn.contains(e.target)) return;
+  if (fileModalIdeMenu.contains(e.target)) return;
+  fileModalIdeMenu.classList.add('hidden');
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && fileModalOverlay && !fileModalOverlay.classList.contains('hidden')) {
+    if (fileModalIdeMenu && !fileModalIdeMenu.classList.contains('hidden')) {
+      fileModalIdeMenu.classList.add('hidden');
+      return;
+    }
     closeFileModal();
   }
 });

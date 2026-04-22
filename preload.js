@@ -164,6 +164,11 @@ contextBridge.exposeInMainWorld('worktree', {
   status: (worktreePath) => ipcRenderer.invoke('worktree:status', { worktreePath }),
 });
 
+contextBridge.exposeInMainWorld('ide', {
+  list: () => ipcRenderer.invoke('ide:list'),
+  open: (id, filePath) => ipcRenderer.invoke('ide:open', { id, filePath }),
+});
+
 contextBridge.exposeInMainWorld('gh', {
   authStatus: () => ipcRenderer.invoke('gh:auth-status'),
   repoInfo: (cwd) => ipcRenderer.invoke('gh:repo-info', cwd),
