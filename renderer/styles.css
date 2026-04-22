@@ -2492,6 +2492,158 @@ html, body {
   margin: 18px 0 8px;
 }
 
+/* ===== PR CI checks ===== */
+.pr-checks-block {
+  margin: 12px 0 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.pr-checks-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.pr-checks-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.pr-checks-title:hover { background: var(--bg-elevated); }
+.pr-checks-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+}
+.pr-checks-chevron.open { transform: rotate(180deg); }
+.pr-checks-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.pr-checks-summary > span { white-space: nowrap; }
+.pr-check-pass     { color: var(--accent); }
+.pr-check-fail     { color: var(--error-red); }
+.pr-check-pending  { color: #ffaa00; }
+.pr-check-skipping { color: var(--text-muted); }
+.pr-check-cancel   { color: var(--text-muted); text-decoration: line-through; }
+
+.pr-checks-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.pr-checks-age {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.pr-checks-btn {
+  background: transparent;
+  border: 1px solid var(--border-light);
+  color: var(--text-muted);
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: color 0.12s, background 0.12s;
+}
+.pr-checks-btn:hover { color: var(--text-primary); background: var(--bg-elevated); }
+.pr-checks-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pr-checks-interval {
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+.pr-checks-interval:hover { color: var(--text-primary); border-color: var(--border); }
+
+.pr-checks-list {
+  border-top: 1px solid var(--border-light);
+  padding: 6px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pr-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 3px 0;
+}
+.pr-check-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+.pr-check-dot.pr-check-pass     { background: var(--accent); }
+.pr-check-dot.pr-check-fail     { background: var(--error-red); }
+.pr-check-dot.pr-check-pending  { background: #ffaa00; animation: pr-check-pulse 1.4s ease-in-out infinite; }
+.pr-check-dot.pr-check-skipping { background: var(--text-muted); opacity: 0.5; }
+.pr-check-dot.pr-check-cancel   { background: var(--text-muted); opacity: 0.5; }
+@keyframes pr-check-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+.pr-check-name {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.pr-check-desc {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40%;
+}
+.pr-check-link {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--text-muted);
+}
+.pr-check-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.pr-checks-error,
+.pr-checks-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 2px 0;
+}
+
 .pr-thread {
   border: 1px solid var(--border);
   border-radius: 8px;

@@ -9,6 +9,7 @@ const state = {
   workspaceWidth: 480,
   prPanelWidth: 480,
   prFilter: 'mine', // 'mine' | 'all'
+  prPollMinutes: 2, // 0 = off; otherwise polling cadence for CI checks on the open PR
   terminalOpen: false,
   terminalHeight: 240,
   defaultModel: null, // last model the user picked; used as initial model for new conversations
@@ -1015,6 +1016,7 @@ function saveState() {
       workspaceWidth: state.workspaceWidth,
       prPanelWidth: state.prPanelWidth,
       prFilter: state.prFilter,
+      prPollMinutes: state.prPollMinutes,
       terminalOpen: state.terminalOpen,
       terminalHeight: state.terminalHeight,
       defaultModel: state.defaultModel,
@@ -1042,6 +1044,9 @@ function loadState() {
       }
       if (data.prFilter === 'all' || data.prFilter === 'mine') {
         state.prFilter = data.prFilter;
+      }
+      if (typeof data.prPollMinutes === 'number' && data.prPollMinutes >= 0 && data.prPollMinutes <= 60) {
+        state.prPollMinutes = data.prPollMinutes;
       }
       if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) {
         state.wsTreeHeight = data.wsTreeHeight;
@@ -1736,6 +1741,9 @@ function togglePrPanel() {
   saveState();
   if (state.rightPanel === 'pr') {
     openPrPanel();
+  } else {
+    // Panel closed — stop polling; next open will restart it.
+    stopPrPoll();
   }
 }
 
@@ -3759,7 +3767,227 @@ const prState = {
   view: 'list', // 'list' | 'detail'
   currentPr: null, // { number, title, ... } in detail view
   listing: false,
+  // CI checks: polled while the detail view is open on a PR.
+  checks: null,        // last successful fetch: { ok, checks, summary, fetchedAt }
+  checksError: null,   // last error message (if any)
+  checksLoading: false,
+  pollTimer: null,     // setInterval handle
+  pollExpanded: false, // user toggled check list open
 };
+
+const PR_POLL_OPTIONS = [
+  { value: 0,  label: 'Off' },
+  { value: 1,  label: '1m' },
+  { value: 2,  label: '2m' },
+  { value: 5,  label: '5m' },
+  { value: 10, label: '10m' },
+];
+
+function prPollIntervalMs() {
+  const m = Math.max(0, Number(state.prPollMinutes) || 0);
+  if (m <= 0) return 0;
+  // Floor at 30s so we can't accidentally slam the CLI.
+  return Math.max(30_000, Math.round(m * 60_000));
+}
+
+function startPrPoll() {
+  stopPrPoll();
+  const ms = prPollIntervalMs();
+  if (!ms) return;
+  prState.pollTimer = setInterval(() => {
+    if (prState.view !== 'detail' || !prState.currentPr) { stopPrPoll(); return; }
+    fetchPrChecks(prState.currentPr, { quiet: true });
+  }, ms);
+}
+
+function stopPrPoll() {
+  if (prState.pollTimer) {
+    clearInterval(prState.pollTimer);
+    prState.pollTimer = null;
+  }
+}
+
+async function fetchPrChecks(pr, opts = {}) {
+  const cwd = ghProjectPath();
+  if (!cwd || !pr || !pr.number) return;
+  if (!opts.quiet) prState.checksLoading = true;
+  renderPrChecksBlock();
+  let res;
+  try { res = await window.gh.prChecks(cwd, pr.number); }
+  catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+  // Stale check — user moved on.
+  if (!prState.currentPr || prState.currentPr.number !== pr.number) return;
+  prState.checksLoading = false;
+  if (res && res.ok) {
+    prState.checks = res;
+    prState.checksError = null;
+  } else {
+    prState.checksError = (res && res.error) || 'Failed to fetch checks';
+  }
+  renderPrChecksBlock();
+}
+
+function checkStatusDot(bucket) {
+  const dot = document.createElement('span');
+  dot.className = `pr-check-dot pr-check-${bucket || 'other'}`;
+  return dot;
+}
+
+function renderPrChecksBlock() {
+  const block = document.getElementById('pr-checks-block');
+  if (!block) return;
+  block.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.className = 'pr-checks-header';
+
+  const titleRow = document.createElement('button');
+  titleRow.type = 'button';
+  titleRow.className = 'pr-checks-title';
+  const chev = document.createElement('span');
+  chev.className = 'pr-checks-chevron' + (prState.pollExpanded ? ' open' : '');
+  chev.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  titleRow.appendChild(chev);
+  const label = document.createElement('span');
+  label.textContent = 'CI';
+  titleRow.appendChild(label);
+
+  const summary = prState.checks && prState.checks.summary;
+  const summaryEl = document.createElement('span');
+  summaryEl.className = 'pr-checks-summary';
+  if (prState.checksLoading && !prState.checks) {
+    summaryEl.textContent = 'Loading…';
+  } else if (prState.checksError && !prState.checks) {
+    summaryEl.className += ' pr-check-fail';
+    summaryEl.textContent = 'unavailable';
+  } else if (summary && summary.total === 0) {
+    summaryEl.textContent = 'no checks';
+  } else if (summary) {
+    const parts = [];
+    if (summary.pass)     parts.push({ cls: 'pr-check-pass',     text: `✓ ${summary.pass}` });
+    if (summary.fail)     parts.push({ cls: 'pr-check-fail',     text: `✗ ${summary.fail}` });
+    if (summary.pending)  parts.push({ cls: 'pr-check-pending',  text: `● ${summary.pending}` });
+    if (summary.skipping) parts.push({ cls: 'pr-check-skipping', text: `↷ ${summary.skipping}` });
+    if (summary.cancel)   parts.push({ cls: 'pr-check-cancel',   text: `⨯ ${summary.cancel}` });
+    for (const p of parts) {
+      const seg = document.createElement('span');
+      seg.className = p.cls;
+      seg.textContent = p.text;
+      summaryEl.appendChild(seg);
+    }
+  } else {
+    summaryEl.textContent = '—';
+  }
+  titleRow.appendChild(summaryEl);
+  titleRow.addEventListener('click', () => {
+    prState.pollExpanded = !prState.pollExpanded;
+    renderPrChecksBlock();
+  });
+  header.appendChild(titleRow);
+
+  // Right-side controls: age, refresh button, poll-interval selector
+  const controls = document.createElement('div');
+  controls.className = 'pr-checks-controls';
+
+  const age = document.createElement('span');
+  age.className = 'pr-checks-age';
+  age.textContent = prState.checks && prState.checks.fetchedAt
+    ? `updated ${formatRelativeAge(prState.checks.fetchedAt)}`
+    : '';
+  controls.appendChild(age);
+
+  const refreshBtn = document.createElement('button');
+  refreshBtn.type = 'button';
+  refreshBtn.className = 'pr-checks-btn';
+  refreshBtn.title = 'Refresh now';
+  refreshBtn.disabled = !!prState.checksLoading;
+  refreshBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="23 4 23 10 17 10"/>
+    <polyline points="1 20 1 14 7 14"/>
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+  </svg>`;
+  refreshBtn.addEventListener('click', () => {
+    if (prState.currentPr) fetchPrChecks(prState.currentPr);
+  });
+  controls.appendChild(refreshBtn);
+
+  const select = document.createElement('select');
+  select.className = 'pr-checks-interval';
+  select.title = 'Auto-refresh interval';
+  for (const opt of PR_POLL_OPTIONS) {
+    const o = document.createElement('option');
+    o.value = String(opt.value);
+    o.textContent = opt.label;
+    if (opt.value === (state.prPollMinutes || 0)) o.selected = true;
+    select.appendChild(o);
+  }
+  select.addEventListener('change', () => {
+    const v = Number(select.value);
+    state.prPollMinutes = Number.isFinite(v) ? v : 0;
+    saveState();
+    startPrPoll();
+    renderPrChecksBlock();
+  });
+  controls.appendChild(select);
+
+  header.appendChild(controls);
+  block.appendChild(header);
+
+  if (!prState.pollExpanded) return;
+
+  // Expanded list
+  const list = document.createElement('div');
+  list.className = 'pr-checks-list';
+  if (prState.checksError && (!prState.checks || !prState.checks.checks || !prState.checks.checks.length)) {
+    const err = document.createElement('div');
+    err.className = 'pr-checks-error';
+    err.textContent = prState.checksError;
+    list.appendChild(err);
+  } else if (prState.checks && prState.checks.checks && prState.checks.checks.length) {
+    for (const c of prState.checks.checks) {
+      const row = document.createElement('div');
+      row.className = 'pr-check-row';
+      row.appendChild(checkStatusDot(c.bucket));
+      const nameEl = document.createElement('span');
+      nameEl.className = 'pr-check-name';
+      nameEl.textContent = c.name + (c.workflow ? ` · ${c.workflow}` : '');
+      row.appendChild(nameEl);
+      if (c.description) {
+        const desc = document.createElement('span');
+        desc.className = 'pr-check-desc';
+        desc.textContent = c.description;
+        row.appendChild(desc);
+      }
+      if (c.link) {
+        const link = document.createElement('a');
+        link.href = c.link;
+        link.className = 'pr-check-link';
+        link.textContent = 'logs';
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (window.shellAPI && window.shellAPI.openExternal) window.shellAPI.openExternal(c.link);
+        });
+        row.appendChild(link);
+      }
+      list.appendChild(row);
+    }
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'pr-checks-empty';
+    empty.textContent = 'No checks on this PR.';
+    list.appendChild(empty);
+  }
+  block.appendChild(list);
+}
+
+function formatRelativeAge(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  return `${h}h ago`;
+}
 
 function ghProjectPath() {
   const conv = getCurrentConversation();
@@ -3772,6 +4000,12 @@ function showPrView(view) {
   prDetailEl.classList.toggle('hidden', view !== 'detail');
   prBackBtn.classList.toggle('hidden', view !== 'detail');
   prHeaderLabel.textContent = view === 'detail' ? `PR #${prState.currentPr ? prState.currentPr.number : ''}` : 'Pull Requests';
+  if (view !== 'detail') {
+    stopPrPoll();
+    prState.checks = null;
+    prState.checksError = null;
+    prState.checksLoading = false;
+  }
 }
 
 async function openPrPanel() {
@@ -3899,6 +4133,10 @@ function renderPrList(prs) {
 
 async function openPrDetail(pr) {
   prState.currentPr = pr;
+  // Reset checks state for the new PR.
+  prState.checks = null;
+  prState.checksError = null;
+  prState.checksLoading = false;
   showPrView('detail');
   prDetailEl.innerHTML = '<div class="pr-state-msg">Loading…</div>';
   const cwd = ghProjectPath();
@@ -3908,6 +4146,9 @@ async function openPrDetail(pr) {
     return;
   }
   renderPrDetail(res.pr, res.reviewComments || [], res.issueComments || [], res.reviews || []);
+  // Fire-and-forget first checks fetch; start the polling loop if enabled.
+  fetchPrChecks(pr);
+  startPrPoll();
 }
 
 function groupReviewThreads(comments) {
@@ -3967,6 +4208,13 @@ function renderPrDetail(pr, reviewComments, issueComments, reviews = []) {
   meta.appendChild(openLink);
   header.appendChild(meta);
   prDetailEl.appendChild(header);
+
+  // CI checks block — renderPrChecksBlock() paints into this each refresh.
+  const checksBlock = document.createElement('div');
+  checksBlock.id = 'pr-checks-block';
+  checksBlock.className = 'pr-checks-block';
+  prDetailEl.appendChild(checksBlock);
+  renderPrChecksBlock();
 
   if (pr.body) {
     const body = document.createElement('div');

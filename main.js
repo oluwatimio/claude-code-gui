@@ -556,6 +556,40 @@ ipcMain.handle('gh:pr-detail', async (_, { cwd, number } = {}) => {
   return { ok: true, pr, reviewComments: reviewCommentsData, issueComments: issueCommentsData, reviews: reviewsData };
 });
 
+// CI checks for a PR. Returns a flat list of checks with normalized
+// state/conclusion and a rollup summary. Polled from the renderer when
+// the PR detail view is open.
+ipcMain.handle('gh:pr-checks', async (_, { cwd, number } = {}) => {
+  if (!cwd || !number) return { ok: false, error: 'Missing cwd or PR number' };
+  const { code, stderr, stdout } = await runGh(
+    ['pr', 'checks', String(number),
+      '--json', 'name,state,bucket,link,workflow,startedAt,completedAt,description'],
+    { cwd }
+  );
+  // `gh pr checks` exits 8 when checks are still pending — not an error.
+  // Anything else non-zero is a real failure.
+  if (code !== 0 && code !== 8) {
+    return { ok: false, error: stderr.trim() || 'gh pr checks failed' };
+  }
+  const rows = parseJsonSafe(stdout) || [];
+  const checks = rows.map((r) => ({
+    name: r.name || '',
+    state: r.state || '',           // e.g. SUCCESS, FAILURE, PENDING, IN_PROGRESS, QUEUED, SKIPPED, CANCELLED
+    bucket: r.bucket || '',         // pass | fail | pending | skipping | cancel
+    link: r.link || '',
+    workflow: r.workflow || '',
+    startedAt: r.startedAt || '',
+    completedAt: r.completedAt || '',
+    description: r.description || '',
+  }));
+  const summary = { pass: 0, fail: 0, pending: 0, skipping: 0, cancel: 0, other: 0, total: checks.length };
+  for (const c of checks) {
+    if (summary[c.bucket] != null) summary[c.bucket]++;
+    else summary.other++;
+  }
+  return { ok: true, checks, summary, fetchedAt: Date.now() };
+});
+
 // Post a top-level PR comment (issue comment).
 ipcMain.handle('gh:pr-comment', async (_, { cwd, number, body } = {}) => {
   if (!cwd || !number || !body) return { ok: false, error: 'Missing cwd, PR number, or body' };
