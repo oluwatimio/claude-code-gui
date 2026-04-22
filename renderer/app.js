@@ -1557,66 +1557,11 @@ function invalidateFilePickerCache() {
   filePicker.cache.clear();
 }
 
-function fuzzyScore(query, target) {
-  // Subsequence match with bonuses for boundary/prefix matches.
-  // Returns { score, matchPositions } or null if no match.
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  if (!q) return { score: 0, positions: [] };
-  const tl = t.length;
-  let ti = 0;
-  let score = 0;
-  let streak = 0;
-  const positions = [];
-  for (let qi = 0; qi < q.length; qi++) {
-    const qc = q[qi];
-    let found = -1;
-    while (ti < tl) {
-      if (t[ti] === qc) { found = ti; break; }
-      ti++;
-    }
-    if (found === -1) return null;
-    positions.push(found);
-    // Prefix of filename (after last '/')
-    const lastSlash = t.lastIndexOf('/', found);
-    if (found === lastSlash + 1) score += 6;
-    // Start of whole path
-    if (found === 0) score += 4;
-    // Boundary (after '/', '-', '_', '.')
-    else if (/[\/\-_\.]/.test(t[found - 1])) score += 3;
-    // Contiguous streak bonus
-    if (found === ti) { streak++; score += streak * 2; } else { streak = 1; }
-    // Small penalty for gaps
-    score -= Math.min(ti - (found - 1), 4);
-    ti = found + 1;
-  }
-  // Shorter paths win ties
-  score -= Math.min(tl * 0.05, 4);
-  return { score, positions };
-}
-
-function rankFiles(files, query) {
-  if (!query) {
-    // Default sort when query is empty: files before dirs, then shortest paths first
-    return files
-      .slice()
-      .sort((a, b) => {
-        if (a.type !== b.type) return a.type === 'file' ? -1 : 1;
-        return a.rel.length - b.rel.length;
-      })
-      .slice(0, 50);
-  }
-  const scored = [];
-  for (const f of files) {
-    const res = fuzzyScore(query, f.rel);
-    if (!res) continue;
-    // Small penalty for dirs so matching files outrank matching dirs at equal base score
-    const score = res.score - (f.type === 'dir' ? 2 : 0);
-    scored.push({ f, score, positions: res.positions });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, 50).map((s) => ({ ...s.f, _positions: s.positions }));
-}
+// Fuzzy scoring + ranking live in lib/fuzzy-match.js (shared with Spotlight
+// and tested in isolation). These thin aliases keep the in-file call sites
+// readable.
+const fuzzyScore = fuzzyMatch.fuzzyScore;
+const rankFiles = (files, query) => fuzzyMatch.rankFiles(files, query, { limit: 50 });
 
 function detectFilePickerTrigger() {
   if (!inputEl) return;
@@ -1792,6 +1737,232 @@ function togglePrPanel() {
   if (state.rightPanel === 'pr') {
     openPrPanel();
   }
+}
+
+// ===== Spotlight (Cmd+Shift+O file-open, Cmd+Shift+F content-search) =====
+//
+// Shared UI component lives in renderer/components/spotlight.js. Each
+// "mode" is a small config factory that plugs in a data source, a row
+// renderer, a preview renderer, and an accept handler. The component
+// takes care of all focus / keyboard / debouncing chrome.
+
+let spotlightInstance = null;
+
+function ensureSpotlight() {
+  if (!spotlightInstance && typeof Spotlight !== 'undefined') {
+    spotlightInstance = Spotlight.create(document.body);
+  }
+  return spotlightInstance;
+}
+
+function appendHighlighted(container, text, positions, className) {
+  const segments = fuzzyMatch.highlightSegments(text, positions);
+  for (const seg of segments) {
+    if (seg.match) {
+      const mark = document.createElement('mark');
+      mark.textContent = seg.text;
+      container.appendChild(mark);
+    } else {
+      container.appendChild(document.createTextNode(seg.text));
+    }
+  }
+  if (className) container.className = className;
+}
+
+function splitRel(rel) {
+  const slash = (rel || '').lastIndexOf('/');
+  return {
+    dir: slash >= 0 ? rel.slice(0, slash) : '',
+    name: slash >= 0 ? rel.slice(slash + 1) : (rel || ''),
+    baseOffset: slash >= 0 ? slash + 1 : 0,
+  };
+}
+
+function fileOpenerConfig() {
+  return {
+    icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+    </svg>`,
+    placeholder: 'Open file…',
+    debounce: 0,
+    emptyText: 'No matching files',
+    typeHint: 'Start typing to find a file in the project',
+    async search(query) {
+      const files = await loadFileListForCurrent();
+      // File-opener skips directories — the workspace panel has its own tree.
+      const onlyFiles = files.filter((f) => f.type !== 'dir');
+      return fuzzyMatch.rankFiles(onlyFiles, query || '', { limit: 60 });
+    },
+    renderRow(result, container) {
+      const { dir, name, baseOffset } = splitRel(result.rel);
+      const namePositions = (result._positions || []).filter((p) => p >= baseOffset).map((p) => p - baseOffset);
+      const dirPositions = (result._positions || []).filter((p) => p < baseOffset);
+      const nameEl = document.createElement('div');
+      nameEl.className = 'spotlight-row-name';
+      appendHighlighted(nameEl, name, namePositions, 'spotlight-row-name');
+      container.appendChild(nameEl);
+      if (dir) {
+        const dirEl = document.createElement('div');
+        appendHighlighted(dirEl, dir, dirPositions, 'spotlight-row-sub');
+        container.appendChild(dirEl);
+      }
+    },
+    async renderPreview(result, container) {
+      const roots = workspaceRoots();
+      const absPath = `${result.root}/${result.rel}`;
+      container.innerHTML = '';
+      const header = document.createElement('div');
+      header.className = 'spotlight-preview-header';
+      header.textContent = result.rel;
+      container.appendChild(header);
+      let res;
+      try { res = await window.files.readFile(roots, absPath); } catch (e) {
+        const err = document.createElement('div');
+        err.className = 'spotlight-preview-error';
+        err.textContent = `Cannot read: ${e.message || e}`;
+        container.appendChild(err);
+        return;
+      }
+      if (res && res.tooLarge) {
+        const note = document.createElement('div');
+        note.className = 'spotlight-preview-error';
+        note.textContent = `File is too large to preview (${Math.round(res.size / 1024)} kB).`;
+        container.appendChild(note);
+        return;
+      }
+      const text = (res && res.content) || '';
+      const lines = text.split('\n').slice(0, 200);
+      const pre = document.createElement('pre');
+      pre.className = 'spotlight-preview-code';
+      for (let i = 0; i < lines.length; i++) {
+        const line = document.createElement('div');
+        line.className = 'line';
+        const num = document.createElement('span');
+        num.className = 'line-no';
+        num.textContent = String(i + 1);
+        const body = document.createElement('span');
+        body.className = 'line-text';
+        body.textContent = lines[i];
+        line.appendChild(num);
+        line.appendChild(body);
+        pre.appendChild(line);
+      }
+      container.appendChild(pre);
+    },
+    onAccept(result) {
+      const absPath = `${result.root}/${result.rel}`;
+      try { openFile(absPath, { pulse: true }); } catch (e) {}
+    },
+  };
+}
+
+function contentSearchConfig() {
+  return {
+    icon: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="7"/>
+      <path d="M21 21l-4.3-4.3"/>
+    </svg>`,
+    placeholder: 'Search in files…',
+    debounce: 180,
+    emptyText: 'No matches in project files',
+    typeHint: 'Type a word or phrase to search across the project',
+    async search(query) {
+      const q = (query || '').trim();
+      if (q.length < 2) return [];
+      const roots = workspaceRoots();
+      if (!roots.length) return [];
+      const res = await window.files.searchContent(roots, q);
+      return (res && Array.isArray(res.results)) ? res.results : [];
+    },
+    renderRow(result, container, query) {
+      const { dir, name } = splitRel(result.rel);
+      const nameEl = document.createElement('div');
+      nameEl.className = 'spotlight-row-name';
+      nameEl.textContent = `${name}:${result.line}`;
+      container.appendChild(nameEl);
+      if (dir) {
+        const dirEl = document.createElement('div');
+        dirEl.className = 'spotlight-row-sub';
+        dirEl.textContent = dir;
+        container.appendChild(dirEl);
+      }
+      // Inline snippet of the matched line with the query highlighted
+      const snippet = document.createElement('div');
+      snippet.className = 'spotlight-row-snippet';
+      const q = (query || '').toLowerCase();
+      const text = result.text || '';
+      const lower = text.toLowerCase();
+      const idx = q ? lower.indexOf(q) : -1;
+      if (idx === -1 || !q) {
+        snippet.textContent = text;
+      } else {
+        snippet.appendChild(document.createTextNode(text.slice(Math.max(0, idx - 16), idx)));
+        const mark = document.createElement('mark');
+        mark.textContent = text.slice(idx, idx + q.length);
+        snippet.appendChild(mark);
+        snippet.appendChild(document.createTextNode(text.slice(idx + q.length, idx + q.length + 80)));
+      }
+      container.appendChild(snippet);
+    },
+    renderPreview(result, container, query) {
+      container.innerHTML = '';
+      const header = document.createElement('div');
+      header.className = 'spotlight-preview-header';
+      header.textContent = `${result.rel}:${result.line}`;
+      container.appendChild(header);
+      const pre = document.createElement('pre');
+      pre.className = 'spotlight-preview-code';
+      const startLine = result.ctxStart || 1;
+      const matchLine = result.line;
+      const q = (query || '').toLowerCase();
+      (result.ctxLines || []).forEach((lineText, i) => {
+        const absLine = startLine + i;
+        const row = document.createElement('div');
+        row.className = 'line' + (absLine === matchLine ? ' match' : '');
+        const num = document.createElement('span');
+        num.className = 'line-no';
+        num.textContent = String(absLine);
+        const body = document.createElement('span');
+        body.className = 'line-text';
+        if (absLine === matchLine && q) {
+          const lower = lineText.toLowerCase();
+          let cursor = 0;
+          let hit = lower.indexOf(q, cursor);
+          while (hit !== -1) {
+            if (hit > cursor) body.appendChild(document.createTextNode(lineText.slice(cursor, hit)));
+            const mark = document.createElement('mark');
+            mark.textContent = lineText.slice(hit, hit + q.length);
+            body.appendChild(mark);
+            cursor = hit + q.length;
+            hit = lower.indexOf(q, cursor);
+          }
+          if (cursor < lineText.length) body.appendChild(document.createTextNode(lineText.slice(cursor)));
+        } else {
+          body.textContent = lineText;
+        }
+        row.appendChild(num);
+        row.appendChild(body);
+        pre.appendChild(row);
+      });
+      container.appendChild(pre);
+    },
+    onAccept(result) {
+      const absPath = `${result.root}/${result.rel}`;
+      try { openFile(absPath, { pulse: true }); } catch (e) {}
+    },
+  };
+}
+
+function openSpotlightFileOpener() {
+  const s = ensureSpotlight();
+  if (!s) return;
+  s.open(fileOpenerConfig());
+}
+
+function openSpotlightContentSearch() {
+  const s = ensureSpotlight();
+  if (!s) return;
+  s.open(contentSearchConfig());
 }
 
 function renderWsEmpty(msg) {
@@ -4473,6 +4644,16 @@ function init() {
     if ((e.ctrlKey || e.metaKey) && e.key === '`') {
       e.preventDefault();
       toggleTerminal();
+    }
+    // Ctrl/Cmd + Shift + O: Spotlight file opener
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'O' || e.key === 'o')) {
+      e.preventDefault();
+      openSpotlightFileOpener();
+    }
+    // Ctrl/Cmd + Shift + F: Spotlight content search
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
+      e.preventDefault();
+      openSpotlightContentSearch();
     }
   });
 

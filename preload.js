@@ -140,6 +140,7 @@ contextBridge.exposeInMainWorld('project', {
 contextBridge.exposeInMainWorld('files', {
   listDir: (roots, dirPath) => ipcRenderer.invoke('fs:list-dir', roots, dirPath),
   listAll: (roots) => ipcRenderer.invoke('fs:list-all-files', roots),
+  searchContent: (roots, query) => ipcRenderer.invoke('fs:search-content', roots, query),
   readFile: (roots, filePath) => ipcRenderer.invoke('fs:read-file', roots, filePath),
   pathInfo: (roots, p) => ipcRenderer.invoke('fs:path-info', roots, p),
   pickAttachments: () => ipcRenderer.invoke('files:pick-attachments'),

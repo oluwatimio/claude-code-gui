@@ -692,6 +692,82 @@ ipcMain.handle('fs:list-all-files', async (_, roots) => {
   return out;
 });
 
+// Content search for Cmd+Shift+F. Scans the provided roots, skipping the
+// usual noise dirs, and returns up to MAX_RESULTS matching lines. One hit
+// per file keeps a single noisy file from dominating results.
+ipcMain.handle('fs:search-content', async (_, roots, query) => {
+  const out = { results: [], filesScanned: 0, truncated: false };
+  if (!Array.isArray(roots) || !roots.length) return out;
+  const q = String(query || '');
+  if (!q) return out;
+
+  const MAX_RESULTS = 300;
+  const MAX_FILES = 4000;
+  const MAX_FILE_BYTES = 512 * 1024;
+  const NULL_BYTE = String.fromCharCode(0);
+  const needle = q.toLowerCase();
+
+  const walk = (rootAbs, currentAbs) => {
+    if (out.truncated) return;
+    let entries;
+    try { entries = fs.readdirSync(currentAbs, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      if (out.truncated) return;
+      if (SKIP_DIR_NAMES.has(e.name)) continue;
+      if (e.name.startsWith('.') && e.name !== '.env') continue;
+      const full = path.join(currentAbs, e.name);
+      if (e.isDirectory()) { walk(rootAbs, full); continue; }
+      if (!e.isFile()) continue;
+      if (out.filesScanned >= MAX_FILES) { out.truncated = true; return; }
+      out.filesScanned++;
+      let stat;
+      try { stat = fs.statSync(full); } catch (err) { continue; }
+      if (stat.size > MAX_FILE_BYTES) continue;
+      let content;
+      try { content = fs.readFileSync(full, 'utf8'); } catch (err) { continue; }
+      if (content.indexOf(NULL_BYTE) !== -1) continue;
+      const lc = content.toLowerCase();
+      const hit = lc.indexOf(needle);
+      if (hit === -1) continue;
+      // Map absolute offset to (line, col); one match per file is enough for
+      // the spotlight result list — previews reveal the context.
+      const lines = content.split('\n');
+      let cursor = 0;
+      let lineIdx = 0;
+      while (lineIdx < lines.length && cursor + lines[lineIdx].length < hit) {
+        cursor += lines[lineIdx].length + 1;
+        lineIdx++;
+      }
+      const col = hit - cursor;
+      const lineText = lines[lineIdx] || '';
+      const ctxStart = Math.max(0, lineIdx - 2);
+      const ctxEnd = Math.min(lines.length, lineIdx + 3);
+      out.results.push({
+        root: rootAbs,
+        rel: path.relative(rootAbs, full),
+        line: lineIdx + 1,
+        col: col + 1,
+        text: lineText.length > 400 ? lineText.slice(0, 400) : lineText,
+        ctxStart: ctxStart + 1,
+        ctxLines: lines.slice(ctxStart, ctxEnd),
+      });
+      if (out.results.length >= MAX_RESULTS) { out.truncated = true; return; }
+    }
+  };
+
+  for (const root of roots) {
+    if (!root) continue;
+    const rootAbs = path.resolve(root);
+    try {
+      const stat = fs.statSync(rootAbs);
+      if (!stat.isDirectory()) continue;
+    } catch (err) { continue; }
+    walk(rootAbs, rootAbs);
+    if (out.truncated) break;
+  }
+  return out;
+});
+
 ipcMain.handle('fs:read-file', async (_, roots, filePath) => {
   if (!filePath || !isInsideAnyRoot(filePath, roots)) {
     throw new Error('Path not allowed');
