@@ -102,6 +102,8 @@ const killTerminalBtn = document.getElementById('btn-terminal-kill');
 const closeTerminalBtn = document.getElementById('btn-terminal-close');
 const branchPill = document.getElementById('branch-pill');
 const branchLabel = document.getElementById('branch-label');
+const branchPrPill = document.getElementById('branch-pr-pill');
+const branchPrLabel = document.getElementById('branch-pr-label');
 const worktreeBtn = document.getElementById('worktree-btn');
 const sidebarTabs = document.querySelectorAll('.sidebar-tab');
 const chatsPanelEl = document.getElementById('chats-panel');
@@ -159,6 +161,7 @@ async function refreshBranch() {
   if (!cwd) {
     branchPill.classList.add('hidden');
     branchLabel.textContent = '';
+    hideBranchPrPill();
     if (currentBranchWatchCwd) {
       window.git.unwatch(currentBranchWatchCwd);
       currentBranchWatchCwd = null;
@@ -176,12 +179,76 @@ async function refreshBranch() {
       branchLabel.textContent = branch;
       branchPill.title = `Branch: ${branch} · click to refresh`;
       branchPill.classList.remove('hidden');
+      refreshBranchPrPill(cwd, branch);
     } else {
       branchPill.classList.add('hidden');
+      hideBranchPrPill();
     }
   } catch (e) {
     branchPill.classList.add('hidden');
+    hideBranchPrPill();
   }
+}
+
+// ===== Branch-PR pill =====
+// Shows "→ PR #123 Title" next to the branch pill whenever the current
+// branch has an open PR. Click jumps to the PR panel + detail view.
+const branchPrCache = new Map(); // key: cwd|branch -> { pr, at }
+let branchPrSeq = 0;
+let branchPrCurrent = null; // { cwd, branch, pr }
+
+function cacheKey(cwd, branch) { return `${cwd}|${branch}`; }
+
+function hideBranchPrPill() {
+  if (!branchPrPill) return;
+  branchPrPill.classList.add('hidden');
+  branchPrPill.classList.remove('draft');
+  branchPrLabel.textContent = '';
+  branchPrCurrent = null;
+}
+
+function applyBranchPrPill(pr) {
+  if (!branchPrPill) return;
+  if (!pr) { hideBranchPrPill(); return; }
+  const draft = !!pr.isDraft;
+  branchPrPill.classList.toggle('draft', draft);
+  branchPrLabel.textContent = `#${pr.number} ${pr.title || ''}`.trim();
+  branchPrPill.title = `Open ${draft ? 'draft ' : ''}PR #${pr.number} — ${pr.title || ''}`;
+  branchPrPill.classList.remove('hidden');
+}
+
+async function refreshBranchPrPill(cwd, branch) {
+  if (!branchPrPill) return;
+  const key = cacheKey(cwd, branch);
+  // Serve cached value immediately (≤ 2 minutes old) while still revalidating.
+  const cached = branchPrCache.get(key);
+  if (cached && Date.now() - cached.at < 120_000) {
+    branchPrCurrent = { cwd, branch, pr: cached.pr };
+    applyBranchPrPill(cached.pr);
+  } else {
+    hideBranchPrPill();
+  }
+  const seq = ++branchPrSeq;
+  let res;
+  try { res = await window.gh.prForBranch(cwd, branch); }
+  catch (e) { res = { ok: false }; }
+  if (seq !== branchPrSeq) return; // stale
+  const pr = res && res.ok ? res.pr : null;
+  branchPrCache.set(key, { pr, at: Date.now() });
+  branchPrCurrent = { cwd, branch, pr };
+  applyBranchPrPill(pr);
+}
+
+function openBranchPrDetail() {
+  if (!branchPrCurrent || !branchPrCurrent.pr) return;
+  // Make sure the PR panel is visible, then jump to detail.
+  if (state.rightPanel !== 'pr') {
+    state.rightPanel = 'pr';
+    applyRightPanelVisibility();
+    saveState();
+    openPrPanel();
+  }
+  openPrDetail(branchPrCurrent.pr);
 }
 
 function renderProjectPill() {
@@ -2283,7 +2350,11 @@ async function openFile(filePath, opts = {}) {
   ensureWsState(conv);
   const roots = workspaceRoots();
   if (roots.length === 0) return;
-  if (state.rightPanel !== 'workspace') {
+  // Only force the workspace panel open for user-initiated opens. Agent file
+  // edits pass { bringToFront: false } so the panel stays closed if the user
+  // had it closed — the activity dot on the Files tab signals background
+  // changes without yanking focus.
+  if (opts.bringToFront !== false && state.rightPanel !== 'workspace') {
     state.rightPanel = 'workspace';
     applyRightPanelVisibility();
     saveState();
@@ -2587,7 +2658,7 @@ async function handleAgentToolUse(data) {
         const info = await window.files.pathInfo(roots, access.path);
         if (info && info.exists && !info.isDir) {
           if (isCurrentConv(conv.id)) {
-            openFile(access.path, { pulse: true });
+            openFile(access.path, { pulse: true, bringToFront: false });
           } else {
             ensureWsState(conv);
             if (!(conv.openFiles || []).some(f => (typeof f === 'string' ? f : f.path) === access.path)) {
@@ -4662,6 +4733,7 @@ function init() {
   window.terminal.onExit(onTerminalExit);
 
   branchPill.addEventListener('click', refreshBranch);
+  if (branchPrPill) branchPrPill.addEventListener('click', openBranchPrDetail);
   if (worktreeBtn) worktreeBtn.addEventListener('click', toggleWorktree);
   window.git.onBranchChanged(({ cwd, branch }) => {
     const conv = getCurrentConversation();
@@ -4670,8 +4742,10 @@ function init() {
       branchLabel.textContent = branch;
       branchPill.title = `Branch: ${branch} · click to refresh`;
       branchPill.classList.remove('hidden');
+      refreshBranchPrPill(cwd, branch);
     } else {
       branchPill.classList.add('hidden');
+      hideBranchPrPill();
     }
   });
   if (state.terminalOpen) mountTerminal();

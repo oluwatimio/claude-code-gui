@@ -609,6 +609,22 @@ ipcMain.handle('gh:pr-detail', async (_, { cwd, number } = {}) => {
   return { ok: true, pr, reviewComments: reviewCommentsData, issueComments: issueCommentsData, reviews: reviewsData };
 });
 
+// Lookup: does the given branch have an open PR? Returns the most recent
+// open PR on --head <branch>, or null. Used by the inline branch-PR chip
+// so users can jump to "the PR for this branch" in one click.
+ipcMain.handle('gh:pr-for-branch', async (_, { cwd, branch } = {}) => {
+  if (!cwd || !branch) return { ok: false, error: 'Missing cwd or branch' };
+  const { code, stderr, stdout } = await runGh(
+    ['pr', 'list', '--head', branch, '--state', 'open',
+      '--json', 'number,title,state,url,isDraft',
+      '--limit', '1'],
+    { cwd }
+  );
+  if (code !== 0) return { ok: false, error: stderr.trim() || 'gh pr list failed' };
+  const rows = parseJsonSafe(stdout) || [];
+  return { ok: true, pr: rows[0] || null };
+});
+
 // CI checks for a PR. Returns a flat list of checks with normalized
 // state/conclusion and a rollup summary. Polled from the renderer when
 // the PR detail view is open.

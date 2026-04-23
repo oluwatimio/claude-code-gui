@@ -175,6 +175,7 @@ contextBridge.exposeInMainWorld('gh', {
   prList: (cwd, filter) => ipcRenderer.invoke('gh:pr-list', { cwd, filter }),
   prDetail: (cwd, number) => ipcRenderer.invoke('gh:pr-detail', { cwd, number }),
   prChecks: (cwd, number) => ipcRenderer.invoke('gh:pr-checks', { cwd, number }),
+  prForBranch: (cwd, branch) => ipcRenderer.invoke('gh:pr-for-branch', { cwd, branch }),
   prComment: (cwd, number, body) => ipcRenderer.invoke('gh:pr-comment', { cwd, number, body }),
   prReplyReview: (cwd, number, inReplyTo, body) => ipcRenderer.invoke('gh:pr-reply-review', { cwd, number, inReplyTo, body }),
 });
