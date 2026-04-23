@@ -1356,7 +1356,7 @@ function finalizeStream(convId, { save = true, stats = null } = {}) {
     inputEl.focus();
     updateToolsCountBadge(conv);
     updateEditsCountBadge(conv);
-    if (currentWorkspaceView === 'edits') renderEditsView();
+    if (currentWorkspaceView === 'edits') updateEditsView();
   }
   renderConversationList();
 }
@@ -2700,7 +2700,7 @@ async function handleAgentToolUse(data) {
     recordFileAccess(conv, access.path, access.kind);
     if (access.kind === 'write' && isCurrentConv(conv.id)) {
       updateEditsCountBadge(conv);
-      if (currentWorkspaceView === 'edits') renderEditsView();
+      if (currentWorkspaceView === 'edits') updateEditsView(access.path);
     }
   }
 }
@@ -3290,6 +3290,86 @@ function renderEditsView() {
   for (const f of files) {
     wsChangedListEl.appendChild(buildChangedItem(f, roots, showBadges));
   }
+}
+
+// Incremental variant used while streaming so the user's currently-expanded
+// inline diff doesn't get rebuilt (and collapsed) on every tool-use event.
+// - New files get appended
+// - Existing rows have their +/− counts re-primed in place
+// - Rows for paths no longer in the list are removed
+// - Expanded state is preserved; if an expanded row's file just changed,
+//   the inline diff is re-fetched in place so the user sees the update
+//   without having to collapse/re-expand.
+function updateEditsView(changedPath) {
+  if (!wsChangedListEl) return;
+  const conv = getCurrentConversation();
+  updateEditsCountBadge(conv);
+  if (!conv) { renderEditsView(); return; }
+
+  const files = collectEditedFiles(conv);
+  const roots = workspaceRoots();
+  const showBadges = roots.length > 1;
+
+  // Drop the empty-state placeholder as soon as we have real items.
+  const emptyEl = wsChangedListEl.querySelector('.ws-changed-empty');
+  if (emptyEl && files.length > 0) emptyEl.remove();
+
+  if (!files.length) { renderEditsView(); return; }
+
+  const desired = new Set(files.map(f => f.path));
+  const existing = new Map();
+  for (const item of Array.from(wsChangedListEl.querySelectorAll('.ws-changed-item'))) {
+    if (!desired.has(item.dataset.path)) {
+      item.remove();
+    } else {
+      existing.set(item.dataset.path, item);
+    }
+  }
+
+  for (const f of files) {
+    const item = existing.get(f.path);
+    if (!item) {
+      wsChangedListEl.appendChild(buildChangedItem(f, roots, showBadges));
+      continue;
+    }
+    // Refresh counts so the +/− totals reflect the latest edit.
+    primeChangedCounts(item, f.path);
+    const wrap = item.querySelector('.ws-changed-diff-wrap');
+    if (!wrap || wrap.dataset.loaded !== 'true') continue;
+    const isExpanded = item.classList.contains('expanded');
+    const isChanged = !changedPath || changedPath === f.path;
+    if (isExpanded && isChanged) {
+      // Live-refresh the diff in place so the user doesn't have to reopen.
+      reloadChangedDiff(item, f.path);
+    } else if (!isExpanded) {
+      // Not visible right now — mark stale; next expand will re-fetch.
+      wrap.dataset.loaded = 'false';
+    }
+  }
+}
+
+async function reloadChangedDiff(itemEl, filePath) {
+  const wrap = itemEl.querySelector('.ws-changed-diff-wrap');
+  if (!wrap) return;
+  const roots = workspaceRoots();
+  let res;
+  try { res = await window.files.fileDiff(roots, filePath); }
+  catch (e) { return; }
+  if (!itemEl.isConnected) return;
+  if (!res || !res.ok) return;
+  const prevScroll = wrap.scrollTop;
+  if (res.status === 'clean') {
+    wrap.innerHTML = '<div class="ws-changed-diff-empty">No changes on disk — the edit may have been reverted, or this file is already committed.</div>';
+  } else if (res.status === 'untracked') {
+    wrap.innerHTML = '<div class="ws-changed-diff-empty">Untracked file — git has no prior version to diff against.</div>';
+  } else if (res.status === 'not-in-repo') {
+    wrap.innerHTML = '<div class="ws-changed-diff-empty">Not inside a git repository.</div>';
+  } else {
+    wrap.innerHTML = '';
+    renderDiffInto(wrap, res.diff);
+  }
+  wrap.dataset.loaded = 'true';
+  wrap.scrollTop = prevScroll;
 }
 
 function buildChangedItem(entry, roots, showBadges) {
