@@ -253,7 +253,11 @@
     <aside id="workspace-panel" class="collapsed">
       <div class="side-resize side-resize-left" id="workspace-resize" title="Drag to resize"></div>
       <div class="ws-view-tabs">
-        <button class="ws-view-tab active" data-view="workspace">
+        <button class="ws-view-tab active" data-view="edits">
+          <span>Edits</span>
+          <span class="ws-view-tab-count" id="ws-edits-count" hidden></span>
+        </button>
+        <button class="ws-view-tab" data-view="workspace">
           <span>Files</span>
           <span class="ws-view-tab-dot" id="ws-files-dot" hidden></span>
         </button>
@@ -262,13 +266,13 @@
           <span class="ws-view-tab-count" id="ws-tools-count" hidden></span>
         </button>
       </div>
-      <div class="ws-view active" data-view="workspace">
-        <div class="ws-tabs" id="ws-tabs"></div>
+      <div class="ws-view active" data-view="edits">
+        <div id="ws-changed-list" class="ws-changed-list"></div>
+      </div>
+      <div class="ws-view" data-view="workspace">
         <div class="ws-tree-wrap">
           <div class="ws-tree" id="ws-tree"></div>
         </div>
-        <div class="ws-vsplitter" id="ws-vsplitter" title="Drag to resize"></div>
-        <div class="ws-tiles" id="ws-tiles"></div>
       </div>
       <div class="ws-view" data-view="tools">
         <div id="ws-tools-filters"></div>
@@ -343,6 +347,13 @@
           <span id="file-modal-subtitle" class="file-modal-subtitle"></span>
         </div>
         <div id="file-modal-actions" class="file-modal-actions">
+          <div class="file-modal-viewtoggle" role="tablist">
+            <button id="file-modal-view-content" type="button" class="file-modal-viewtab active" data-view="content">Content</button>
+            <button id="file-modal-view-diff" type="button" class="file-modal-viewtab" data-view="diff">
+              <span>Diff</span>
+              <span id="file-modal-diff-badge" class="file-modal-diff-badge" hidden></span>
+            </button>
+          </div>
           <div class="file-modal-ide-wrap">
             <button id="file-modal-ide-btn" class="file-modal-ide-btn" type="button" title="Open in external editor">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

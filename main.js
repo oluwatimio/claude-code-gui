@@ -798,6 +798,54 @@ ipcMain.handle('fs:list-all-files', async (_, roots) => {
 // Content search for Cmd+Shift+F. Scans the provided roots, skipping the
 // usual noise dirs, and returns up to MAX_RESULTS matching lines. One hit
 // per file keeps a single noisy file from dominating results.
+// Git diff for a single file vs. HEAD. Used by the file modal's Diff toggle
+// to answer "what changed here?" without leaving the app.
+ipcMain.handle('fs:file-diff', async (_, roots, filePath) => {
+  if (!filePath || !isInsideAnyRoot(filePath, roots)) {
+    return { ok: false, status: 'error', error: 'Path not allowed' };
+  }
+  const { spawn } = require('child_process');
+  const run = (args, cwd) => new Promise((resolve) => {
+    const child = spawn('git', args, { cwd, env: { ...process.env, GIT_PAGER: 'cat', LC_ALL: 'C' } });
+    let out = '', err = '';
+    child.stdout.on('data', (d) => { out += d.toString(); });
+    child.stderr.on('data', (d) => { err += d.toString(); });
+    child.on('error', (e) => resolve({ code: -1, out: '', err: e.message }));
+    child.on('close', (code) => resolve({ code, out, err }));
+  });
+
+  const dir = path.dirname(filePath);
+  // Find the repo root; if this isn't a git repo, bail.
+  const top = await run(['rev-parse', '--show-toplevel'], dir);
+  if (top.code !== 0) return { ok: true, status: 'not-in-repo', diff: '', additions: 0, deletions: 0 };
+  const repoRoot = top.out.trim();
+  if (!repoRoot) return { ok: true, status: 'not-in-repo', diff: '', additions: 0, deletions: 0 };
+  const rel = path.relative(repoRoot, filePath);
+
+  // Check tracked/untracked status first so we can give a friendly message.
+  const status = await run(['status', '--porcelain', '--', rel], repoRoot);
+  const statusLine = status.out.split('\n').find((l) => l.trim()) || '';
+  const statusCode = statusLine.slice(0, 2).trim();
+  if (statusCode === '??') {
+    return { ok: true, status: 'untracked', diff: '', additions: 0, deletions: 0 };
+  }
+
+  const diff = await run(['diff', '--no-color', 'HEAD', '--', rel], repoRoot);
+  if (diff.code !== 0 && diff.err) {
+    return { ok: false, status: 'error', error: diff.err.trim() };
+  }
+  const text = diff.out || '';
+  if (!text.trim()) {
+    return { ok: true, status: 'clean', diff: '', additions: 0, deletions: 0 };
+  }
+  let additions = 0, deletions = 0;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+    else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+  }
+  return { ok: true, status: 'modified', diff: text, additions, deletions };
+});
+
 ipcMain.handle('fs:search-content', async (_, roots, query) => {
   const out = { results: [], filesScanned: 0, truncated: false };
   if (!Array.isArray(roots) || !roots.length) return out;

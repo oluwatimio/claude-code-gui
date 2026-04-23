@@ -11,6 +11,7 @@ const state = {
   prFilter: 'mine', // 'mine' | 'all'
   prPollMinutes: 2, // 0 = off; otherwise polling cadence for CI checks on the open PR
   preferredIde: null, // last IDE the user picked from the file modal's "Open in" menu
+  workspaceView: 'edits', // 'edits' | 'workspace' | 'tools' — active right-panel tab
   terminalOpen: false,
   terminalHeight: 240,
   defaultModel: null, // last model the user picked; used as initial model for new conversations
@@ -69,10 +70,16 @@ const modelSelector = document.getElementById('model-selector');
 const modelLabel = document.getElementById('model-label');
 const modelMenu = document.getElementById('model-menu');
 const workspacePanel = document.getElementById('workspace-panel');
+// The old tree + tiles layout: the Files tab is now tree-only, and a new
+// Edits tab holds the session-scoped "files changed" list. wsTabsEl /
+// wsTilesEl / wsVSplitter will be null after the HTML reshuffle; legacy
+// call sites null-check instead of a broader refactor.
 const wsTabsEl = document.getElementById('ws-tabs');
 const wsTreeEl = document.getElementById('ws-tree');
 const wsTilesEl = document.getElementById('ws-tiles');
 const wsVSplitter = document.getElementById('ws-vsplitter');
+const wsChangedListEl = document.getElementById('ws-changed-list');
+const wsEditsCountEl = document.getElementById('ws-edits-count');
 const wsToolsListEl = document.getElementById('ws-tools-list');
 const wsToolsFiltersEl = document.getElementById('ws-tools-filters');
 const wsToolsCountEl = document.getElementById('ws-tools-count');
@@ -535,7 +542,7 @@ function updateFilesAccessedContents(wrap, filesAccessed) {
       ? `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`
       : `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>`;
     chip.innerHTML = icon + `<span class="file-access-name">${escapeHtml(basename(entry.path))}</span>`;
-    chip.addEventListener('click', () => openFile(entry.path, { pulse: true }));
+    chip.addEventListener('click', () => openFileInModal(entry.path));
     body.appendChild(chip);
   }
 }
@@ -768,6 +775,7 @@ function switchConversation(id) {
   renderWsTree();
   restoreOpenFiles();
   renderToolsView();
+  renderEditsView();
   renderRewindBanner();
   setFilesActivityDot(false);
   if (state.terminalOpen) mountTerminal();
@@ -1063,10 +1071,11 @@ function newChat() {
   renderProjectPill();
   refreshBranch();
   renderModelSelector();
-  wsTilesEl.innerHTML = '';
+  if (wsTilesEl) wsTilesEl.innerHTML = '';
   renderWsTabs();
   renderWsTree();
   renderToolsView();
+  renderEditsView();
   renderRewindBanner();
   inputEl.focus();
 }
@@ -1086,6 +1095,7 @@ function saveState() {
       prFilter: state.prFilter,
       prPollMinutes: state.prPollMinutes,
       preferredIde: state.preferredIde,
+      workspaceView: state.workspaceView,
       terminalOpen: state.terminalOpen,
       terminalHeight: state.terminalHeight,
       defaultModel: state.defaultModel,
@@ -1119,6 +1129,9 @@ function loadState() {
       }
       if (typeof data.preferredIde === 'string' && data.preferredIde) {
         state.preferredIde = data.preferredIde;
+      }
+      if (data.workspaceView === 'edits' || data.workspaceView === 'workspace' || data.workspaceView === 'tools') {
+        state.workspaceView = data.workspaceView;
       }
       if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) {
         state.wsTreeHeight = data.wsTreeHeight;
@@ -1342,6 +1355,8 @@ function finalizeStream(convId, { save = true, stats = null } = {}) {
     updateInputControlsForCurrent();
     inputEl.focus();
     updateToolsCountBadge(conv);
+    updateEditsCountBadge(conv);
+    if (currentWorkspaceView === 'edits') renderEditsView();
   }
   renderConversationList();
 }
@@ -2046,10 +2061,15 @@ function openSpotlightContentSearch() {
 }
 
 function renderWsEmpty(msg) {
-  wsTabsEl.innerHTML = '';
-  wsTreeEl.innerHTML = `<div class="ws-empty">${escapeHtml(msg)}</div>`;
+  if (wsTabsEl) wsTabsEl.innerHTML = '';
+  if (wsTreeEl) wsTreeEl.innerHTML = `<div class="ws-empty">${escapeHtml(msg)}</div>`;
 }
 
+// The old `ws-tabs` element is gone (Files tab is tree-only), but other
+// callers still invoke renderWsTabs() to (a) ensure conv.activeWsTab is
+// set against the current roots and (b) render the root picker if it
+// exists. Keep the state-sync behavior; render nothing when the element
+// is absent.
 function renderWsTabs() {
   const conv = getCurrentConversation();
   if (!conv) { renderWsEmpty('No chat'); return; }
@@ -2059,6 +2079,7 @@ function renderWsTabs() {
   if (!conv.activeWsTab || !roots.includes(conv.activeWsTab)) {
     conv.activeWsTab = roots[0];
   }
+  if (!wsTabsEl) return;
   wsTabsEl.innerHTML = '';
   for (const r of roots) {
     const tab = document.createElement('button');
@@ -2168,7 +2189,7 @@ async function mountTreeChildren(ulEl, dirPath, depth) {
         saveState();
       });
     } else {
-      row.addEventListener('click', () => openFile(entry.path));
+      row.addEventListener('click', () => openFileInModal(entry.path));
     }
 
     ulEl.appendChild(li);
@@ -2176,6 +2197,7 @@ async function mountTreeChildren(ulEl, dirPath, depth) {
 }
 
 function findPane(filePath) {
+  if (!wsTilesEl) return null;
   return wsTilesEl.querySelector(`.ws-pane[data-path="${cssEscape(filePath)}"]`);
 }
 
@@ -2201,9 +2223,14 @@ const fileModalCloseBtn = document.getElementById('file-modal-close');
 const fileModalIdeBtn = document.getElementById('file-modal-ide-btn');
 const fileModalIdeLabel = document.getElementById('file-modal-ide-label');
 const fileModalIdeMenu = document.getElementById('file-modal-ide-menu');
+const fileModalViewContentBtn = document.getElementById('file-modal-view-content');
+const fileModalViewDiffBtn = document.getElementById('file-modal-view-diff');
+const fileModalDiffBadge = document.getElementById('file-modal-diff-badge');
 
 // Track the path currently in the modal so the IDE button knows what to open.
 let fileModalPath = null;
+let fileModalView = 'content'; // 'content' | 'diff'
+let fileModalLoadSeq = 0;
 let cachedIdeList = null;
 
 function closeFileModal() {
@@ -2211,6 +2238,106 @@ function closeFileModal() {
   fileModalBodyEl.innerHTML = '';
   if (fileModalIdeMenu) fileModalIdeMenu.classList.add('hidden');
   fileModalPath = null;
+  fileModalView = 'content';
+  setFileModalViewButton('content');
+  setDiffBadge(null);
+}
+
+function setFileModalViewButton(which) {
+  if (fileModalViewContentBtn) fileModalViewContentBtn.classList.toggle('active', which === 'content');
+  if (fileModalViewDiffBtn) fileModalViewDiffBtn.classList.toggle('active', which === 'diff');
+}
+
+function setDiffBadge(info) {
+  if (!fileModalDiffBadge || !fileModalViewDiffBtn) return;
+  if (!info || info.status !== 'modified') {
+    fileModalDiffBadge.hidden = true;
+    fileModalDiffBadge.textContent = '';
+    fileModalViewDiffBtn.disabled = !info || (info.status === 'not-in-repo');
+    return;
+  }
+  const a = info.additions || 0;
+  const d = info.deletions || 0;
+  fileModalDiffBadge.hidden = false;
+  fileModalDiffBadge.textContent = `+${a} −${d}`;
+  fileModalViewDiffBtn.disabled = false;
+}
+
+function renderDiffInto(container, diffText) {
+  container.innerHTML = '';
+  const pre = document.createElement('pre');
+  pre.className = 'file-modal-diff';
+  const lines = (diffText || '').split('\n');
+  for (const raw of lines) {
+    const line = document.createElement('span');
+    line.className = 'diff-line';
+    if (raw.startsWith('@@')) line.classList.add('hunk');
+    else if (raw.startsWith('+++') || raw.startsWith('---') || raw.startsWith('diff ') || raw.startsWith('index ') || raw.startsWith('new file') || raw.startsWith('deleted file')) line.classList.add('file');
+    else if (raw.startsWith('+')) line.classList.add('add');
+    else if (raw.startsWith('-')) line.classList.add('del');
+    line.textContent = raw || ' ';
+    pre.appendChild(line);
+  }
+  container.appendChild(pre);
+}
+
+async function loadFileModalContent(filePath, seq) {
+  const roots = workspaceRoots();
+  fileModalBodyEl.innerHTML = '<div class="ws-pane-loading">Loading…</div>';
+  try {
+    const res = await window.files.readFile(roots, filePath);
+    if (seq !== fileModalLoadSeq) return;
+    if (res.tooLarge) {
+      fileModalBodyEl.innerHTML = `<div class="ws-pane-notice">File too large to preview (${formatBytes(res.size)})</div>`;
+      return;
+    }
+    if (res.binary) {
+      fileModalBodyEl.innerHTML = `<div class="ws-pane-notice">Binary file (${formatBytes(res.size)})</div>`;
+      return;
+    }
+    const hl = window.libs.highlightCode(res.content, res.lang || '');
+    fileModalBodyEl.innerHTML = `<pre><code class="hljs language-${hl.language || ''}">${hl.html}</code></pre>`;
+  } catch (e) {
+    if (seq !== fileModalLoadSeq) return;
+    fileModalBodyEl.innerHTML = `<div class="ws-pane-notice error">${escapeHtml(String(e.message || e))}</div>`;
+  }
+}
+
+async function loadFileModalDiff(filePath, seq) {
+  const roots = workspaceRoots();
+  fileModalBodyEl.innerHTML = '<div class="ws-pane-loading">Diffing…</div>';
+  let res;
+  try { res = await window.files.fileDiff(roots, filePath); }
+  catch (e) { res = { ok: false, status: 'error', error: String(e && e.message || e) }; }
+  if (seq !== fileModalLoadSeq) return;
+  setDiffBadge(res && res.ok ? res : null);
+  if (!res || !res.ok) {
+    fileModalBodyEl.innerHTML = `<div class="ws-pane-notice error">${escapeHtml((res && res.error) || 'Failed to compute diff')}</div>`;
+    return;
+  }
+  if (res.status === 'clean') {
+    fileModalBodyEl.innerHTML = '<div class="file-modal-diff-empty">No changes vs. HEAD.</div>';
+    return;
+  }
+  if (res.status === 'untracked') {
+    fileModalBodyEl.innerHTML = '<div class="file-modal-diff-empty">Untracked file — not tracked by git yet.</div>';
+    return;
+  }
+  if (res.status === 'not-in-repo') {
+    fileModalBodyEl.innerHTML = '<div class="file-modal-diff-empty">Not inside a git repository.</div>';
+    return;
+  }
+  renderDiffInto(fileModalBodyEl, res.diff);
+}
+
+function switchFileModalView(next) {
+  if (next !== 'content' && next !== 'diff') return;
+  if (!fileModalPath) return;
+  fileModalView = next;
+  setFileModalViewButton(next);
+  const seq = ++fileModalLoadSeq;
+  if (next === 'content') loadFileModalContent(fileModalPath, seq);
+  else loadFileModalDiff(fileModalPath, seq);
 }
 
 async function ensureIdeList() {
@@ -2282,32 +2409,35 @@ function toggleIdeMenu(force) {
 async function openFileInModal(filePath) {
   if (!filePath) return;
   fileModalPath = filePath;
+  fileModalView = 'content';
+  setFileModalViewButton('content');
+  setDiffBadge(null);
   const roots = workspaceRoots();
   fileModalNameEl.textContent = basename(filePath);
   fileModalSubtitleEl.textContent = ' · ' + (relativeToRoot(filePath, roots) || filePath);
-  fileModalBodyEl.innerHTML = '<div class="ws-pane-loading">Loading…</div>';
   fileModalOverlay.classList.remove('hidden');
   ensureIdeList().then(updateIdeBtnLabel);
 
-  try {
-    const res = await window.files.readFile(roots, filePath);
-    if (res.tooLarge) {
-      fileModalBodyEl.innerHTML = `<div class="ws-pane-notice">File too large to preview (${formatBytes(res.size)})</div>`;
-      return;
-    }
-    if (res.binary) {
-      fileModalBodyEl.innerHTML = `<div class="ws-pane-notice">Binary file (${formatBytes(res.size)})</div>`;
-      return;
-    }
-    const hl = window.libs.highlightCode(res.content, res.lang || '');
-    fileModalBodyEl.innerHTML = `<pre><code class="hljs language-${hl.language || ''}">${hl.html}</code></pre>`;
-  } catch (e) {
-    fileModalBodyEl.innerHTML = `<div class="ws-pane-notice error">${escapeHtml(String(e.message || e))}</div>`;
-  }
+  const seq = ++fileModalLoadSeq;
+  loadFileModalContent(filePath, seq);
+  // Probe the diff in the background so the badge can show +/− counts
+  // without forcing the user onto the Diff tab.
+  window.files.fileDiff(roots, filePath)
+    .then((res) => {
+      if (seq !== fileModalLoadSeq) return;
+      setDiffBadge(res && res.ok ? res : null);
+    })
+    .catch(() => { if (seq === fileModalLoadSeq) setDiffBadge(null); });
 }
 
 if (fileModalCloseBtn) {
   fileModalCloseBtn.addEventListener('click', closeFileModal);
+}
+if (fileModalViewContentBtn) {
+  fileModalViewContentBtn.addEventListener('click', () => switchFileModalView('content'));
+}
+if (fileModalViewDiffBtn) {
+  fileModalViewDiffBtn.addEventListener('click', () => switchFileModalView('diff'));
 }
 if (fileModalOverlay) {
   fileModalOverlay.addEventListener('click', (e) => {
@@ -2344,102 +2474,17 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// openFile now just flags activity + opens the file in the modal. The old
+// tile-based multi-file viewer was retired when the Files tab became
+// tree-only and the Edits tab took over the "what did Claude change?"
+// role. `opts.silent` (used by restoration flows) still suppresses the
+// activity dot; `opts.bringToFront === false` (agent path) is still
+// honored so silent edits don't yank focus.
 async function openFile(filePath, opts = {}) {
-  const conv = getCurrentConversation();
-  if (!conv) return;
-  ensureWsState(conv);
-  const roots = workspaceRoots();
-  if (roots.length === 0) return;
-  // Only force the workspace panel open for user-initiated opens. Agent file
-  // edits pass { bringToFront: false } so the panel stays closed if the user
-  // had it closed — the activity dot on the Files tab signals background
-  // changes without yanking focus.
-  if (opts.bringToFront !== false && state.rightPanel !== 'workspace') {
-    state.rightPanel = 'workspace';
-    applyRightPanelVisibility();
-    saveState();
-  }
+  if (!filePath) return;
   if (!opts.silent) markFilesActivity();
-
-  const existing = findPane(filePath);
-  if (existing) {
-    pulseHeader(existing);
-    await refreshPaneBody(existing, filePath);
-    existing.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
-    return;
-  }
-
-  let width = 420;
-  const stored = conv.openFiles.find(f => f.path === filePath);
-  if (stored && typeof stored.width === 'number') width = stored.width;
-
-  const pane = document.createElement('div');
-  pane.className = 'ws-pane';
-  pane.dataset.path = filePath;
-  pane.style.width = `${width}px`;
-
-  const header = document.createElement('div');
-  header.className = 'ws-pane-header';
-  const title = document.createElement('div');
-  title.className = 'ws-pane-title';
-  const name = document.createElement('span');
-  name.className = 'ws-pane-name';
-  name.textContent = basename(filePath);
-  const dir = document.createElement('span');
-  dir.className = 'ws-pane-dir';
-  dir.textContent = ' · ' + relativeToRoot(filePath, roots);
-  title.appendChild(name);
-  title.appendChild(dir);
-  title.title = filePath;
-
-  const expand = document.createElement('button');
-  expand.className = 'ws-pane-expand';
-  expand.type = 'button';
-  expand.title = 'Open in large view';
-  expand.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`;
-  expand.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openFileInModal(filePath);
-  });
-
-  const close = document.createElement('button');
-  close.className = 'ws-pane-close';
-  close.type = 'button';
-  close.title = 'Close';
-  close.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>`;
-  close.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeFile(filePath);
-  });
-
-  header.appendChild(title);
-  header.appendChild(expand);
-  header.appendChild(close);
-
-  const body = document.createElement('div');
-  body.className = 'ws-pane-body';
-  body.innerHTML = '<div class="ws-pane-loading">Loading…</div>';
-
-  const resize = document.createElement('div');
-  resize.className = 'ws-pane-resize';
-
-  pane.appendChild(header);
-  pane.appendChild(body);
-  pane.appendChild(resize);
-
-  wsTilesEl.appendChild(pane);
-  setupPaneResize(pane, resize);
-
-  if (!stored) {
-    conv.openFiles.push({ path: filePath, width });
-    saveState();
-  }
-
-  await refreshPaneBody(pane, filePath);
-  if (opts.pulse) pulseHeader(pane);
-  if (!opts.silent) {
-    wsTilesEl.scrollTo({ left: wsTilesEl.scrollWidth, behavior: 'smooth' });
-  }
+  if (opts.bringToFront === false) return;
+  openFileInModal(filePath);
 }
 
 async function refreshPaneBody(pane, filePath) {
@@ -2566,6 +2611,10 @@ function setupSideResize(handle, panel, onCommit, { min, edge }) {
 }
 
 function setupVerticalSplit() {
+  // The vertical splitter was between the tree and the tile view; both are
+  // gone now. Keep the function as a no-op so existing init code still
+  // compiles, but bail before doing anything.
+  if (!wsVSplitter) return;
   const treeWrap = document.querySelector('.ws-tree-wrap');
   if (treeWrap) treeWrap.style.flexBasis = `${state.wsTreeHeight}px`;
   let startY = 0, startH = 0, dragging = false;
@@ -2593,13 +2642,10 @@ function setupVerticalSplit() {
 }
 
 function restoreOpenFiles() {
+  // The tile view was retired — files now open in the big file modal on
+  // demand rather than as persistent tiles. Nothing to restore.
+  if (!wsTilesEl) return;
   wsTilesEl.innerHTML = '';
-  const conv = getCurrentConversation();
-  if (!conv) return;
-  ensureWsState(conv);
-  for (const entry of conv.openFiles || []) {
-    openFile(entry.path, { silent: true });
-  }
 }
 
 function extractToolFileAccess(data) {
@@ -2647,27 +2693,14 @@ async function handleAgentToolUse(data) {
   // Record the tool call so we can render it inline
   recordToolCall(conv, data);
 
-  // Keep legacy files-accessed tracking for Read/Write/Edit
+  // Record file accesses so the Edits tab (and the per-message chip row)
+  // can reflect them. No tile is opened — that retired with the old view.
   const access = extractToolFileAccess(data);
   if (access) {
     recordFileAccess(conv, access.path, access.kind);
-
-    const roots = workspaceRoots(conv);
-    if (roots.length > 0) {
-      try {
-        const info = await window.files.pathInfo(roots, access.path);
-        if (info && info.exists && !info.isDir) {
-          if (isCurrentConv(conv.id)) {
-            openFile(access.path, { pulse: true, bringToFront: false });
-          } else {
-            ensureWsState(conv);
-            if (!(conv.openFiles || []).some(f => (typeof f === 'string' ? f : f.path) === access.path)) {
-              conv.openFiles.push({ path: access.path, width: 420 });
-            }
-            saveState();
-          }
-        }
-      } catch (e) {}
+    if (access.kind === 'write' && isCurrentConv(conv.id)) {
+      updateEditsCountBadge(conv);
+      if (currentWorkspaceView === 'edits') renderEditsView();
     }
   }
 }
@@ -3048,7 +3081,7 @@ function renderToolCallBody(entry) {
 
 // ===== Tools view (right panel) =====
 
-let currentWorkspaceView = 'workspace';
+let currentWorkspaceView = 'edits';
 let toolsFilter = 'all';
 
 const TOOLS_FILTER_DEFS = [
@@ -3152,8 +3185,9 @@ function createPanelToolCallEntry(entry) {
 }
 
 function switchWorkspaceView(name) {
-  if (name !== 'workspace' && name !== 'tools') return;
+  if (name !== 'edits' && name !== 'workspace' && name !== 'tools') return;
   currentWorkspaceView = name;
+  if (state) { state.workspaceView = name; saveState(); }
   document.querySelectorAll('.ws-view-tab').forEach((t) => {
     t.classList.toggle('active', t.dataset.view === name);
   });
@@ -3161,6 +3195,7 @@ function switchWorkspaceView(name) {
     v.classList.toggle('active', v.dataset.view === name);
   });
   if (name === 'workspace') setFilesActivityDot(false);
+  if (name === 'edits') renderEditsView();
   if (name === 'tools') renderToolsView();
 }
 
@@ -3171,6 +3206,221 @@ function setFilesActivityDot(on) {
 
 function markFilesActivity() {
   if (currentWorkspaceView !== 'workspace') setFilesActivityDot(true);
+}
+
+// Sync tab state + active view without calling saveState (used by init).
+function applyWorkspaceViewTab(name) {
+  document.querySelectorAll('.ws-view-tab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.view === name);
+  });
+  document.querySelectorAll('#workspace-panel .ws-view').forEach((v) => {
+    v.classList.toggle('active', v.dataset.view === name);
+  });
+}
+
+// ===== Edits view =====
+// The Edits tab lists every file the agent has written to or edited in the
+// current chat session. Click a row to expand an inline diff; hit the
+// expand button (or ↵ on the row) to open the big file modal for a
+// full-screen read.
+
+// Collect write-kind file accesses across all messages + the live stream,
+// deduping by path and keeping the most-recent kind.
+function collectEditedFiles(conv) {
+  const byPath = new Map();
+  if (!conv) return [];
+  const visit = (list) => {
+    if (!Array.isArray(list)) return;
+    for (const entry of list) {
+      if (!entry || !entry.path || entry.kind !== 'write') continue;
+      const existing = byPath.get(entry.path);
+      if (existing) existing.count = (existing.count || 1) + 1;
+      else byPath.set(entry.path, { path: entry.path, kind: 'write', count: 1 });
+    }
+  };
+  for (const msg of (conv.messages || [])) {
+    visit(msg.filesAccessed);
+  }
+  visit(conv.streamFilesAccessed);
+  return Array.from(byPath.values());
+}
+
+function updateEditsCountBadge(conv) {
+  if (!wsEditsCountEl) return;
+  const files = collectEditedFiles(conv || getCurrentConversation());
+  if (files.length > 0) {
+    wsEditsCountEl.textContent = files.length > 99 ? '99+' : String(files.length);
+    wsEditsCountEl.hidden = false;
+  } else {
+    wsEditsCountEl.textContent = '';
+    wsEditsCountEl.hidden = true;
+  }
+}
+
+function rootForPath(filePath, roots) {
+  for (const r of roots) {
+    if (!r) continue;
+    if (filePath === r || filePath.startsWith(r + '/')) return r;
+  }
+  return null;
+}
+
+function renderEditsView() {
+  if (!wsChangedListEl) return;
+  const conv = getCurrentConversation();
+  updateEditsCountBadge(conv);
+  wsChangedListEl.innerHTML = '';
+  if (!conv) {
+    const empty = document.createElement('div');
+    empty.className = 'ws-changed-empty';
+    empty.textContent = 'Start a chat to see files Claude edits here.';
+    wsChangedListEl.appendChild(empty);
+    return;
+  }
+  const files = collectEditedFiles(conv);
+  if (!files.length) {
+    const empty = document.createElement('div');
+    empty.className = 'ws-changed-empty';
+    empty.textContent = 'No files edited in this chat yet.';
+    wsChangedListEl.appendChild(empty);
+    return;
+  }
+  const roots = workspaceRoots();
+  const showBadges = roots.length > 1;
+  for (const f of files) {
+    wsChangedListEl.appendChild(buildChangedItem(f, roots, showBadges));
+  }
+}
+
+function buildChangedItem(entry, roots, showBadges) {
+  const item = document.createElement('div');
+  item.className = 'ws-changed-item';
+  item.dataset.path = entry.path;
+
+  const row = document.createElement('div');
+  row.className = 'ws-changed-row';
+
+  const chev = document.createElement('span');
+  chev.className = 'ws-changed-chevron';
+  chev.innerHTML = `<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>`;
+  row.appendChild(chev);
+
+  const icon = document.createElement('span');
+  icon.className = 'ws-changed-kindicon';
+  icon.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>`;
+  row.appendChild(icon);
+
+  const name = document.createElement('span');
+  name.className = 'ws-changed-name';
+  name.textContent = basename(entry.path);
+  name.title = entry.path;
+  row.appendChild(name);
+
+  const rel = relativeToRoot(entry.path, roots);
+  if (rel) {
+    const dir = document.createElement('span');
+    dir.className = 'ws-changed-dir';
+    dir.textContent = rel;
+    row.appendChild(dir);
+  }
+
+  const root = rootForPath(entry.path, roots);
+  if (showBadges && root) {
+    const badge = document.createElement('span');
+    badge.className = 'ws-changed-badge';
+    badge.textContent = basename(root);
+    badge.title = root;
+    row.appendChild(badge);
+  }
+
+  const counts = document.createElement('span');
+  counts.className = 'ws-changed-counts';
+  counts.dataset.role = 'counts';
+  row.appendChild(counts);
+
+  const openBtn = document.createElement('button');
+  openBtn.type = 'button';
+  openBtn.className = 'ws-changed-open';
+  openBtn.title = 'Open in file viewer';
+  openBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="15 3 21 3 21 9"/>
+    <polyline points="9 21 3 21 3 15"/>
+    <line x1="21" y1="3" x2="14" y2="10"/>
+    <line x1="3" y1="21" x2="10" y2="14"/>
+  </svg>`;
+  openBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openFileInModal(entry.path);
+  });
+  row.appendChild(openBtn);
+
+  const diffWrap = document.createElement('div');
+  diffWrap.className = 'ws-changed-diff-wrap';
+  diffWrap.hidden = true;
+  diffWrap.dataset.loaded = 'false';
+
+  row.addEventListener('click', () => toggleChangedItem(item, entry.path));
+  item.appendChild(row);
+  item.appendChild(diffWrap);
+
+  // Prime the +/− counts in the background so collapsed rows still show
+  // them without requiring the user to expand first.
+  primeChangedCounts(item, entry.path);
+
+  return item;
+}
+
+async function primeChangedCounts(itemEl, filePath) {
+  const countsEl = itemEl.querySelector('[data-role="counts"]');
+  if (!countsEl) return;
+  const roots = workspaceRoots();
+  try {
+    const res = await window.files.fileDiff(roots, filePath);
+    if (!res || !res.ok) return;
+    if (res.status === 'modified') {
+      countsEl.innerHTML = `<span class="add">+${res.additions}</span> <span class="del">−${res.deletions}</span>`;
+    } else if (res.status === 'untracked') {
+      countsEl.innerHTML = `<span class="add">new</span>`;
+    } else if (res.status === 'clean') {
+      countsEl.innerHTML = `<span class="del">no changes</span>`;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function toggleChangedItem(itemEl, filePath) {
+  const wrap = itemEl.querySelector('.ws-changed-diff-wrap');
+  if (!wrap) return;
+  const isExpanded = itemEl.classList.contains('expanded');
+  if (isExpanded) {
+    itemEl.classList.remove('expanded');
+    wrap.hidden = true;
+    return;
+  }
+  itemEl.classList.add('expanded');
+  wrap.hidden = false;
+  if (wrap.dataset.loaded !== 'true') {
+    wrap.innerHTML = '<div class="ws-changed-diff-loading">Diffing…</div>';
+    const roots = workspaceRoots();
+    let res;
+    try { res = await window.files.fileDiff(roots, filePath); }
+    catch (e) { res = { ok: false, error: String(e && e.message || e) }; }
+    if (!itemEl.isConnected) return;
+    if (!res || !res.ok) {
+      wrap.innerHTML = `<div class="ws-changed-diff-empty">${escapeHtml(res && res.error || 'Diff unavailable')}</div>`;
+      return;
+    }
+    if (res.status === 'clean') {
+      wrap.innerHTML = '<div class="ws-changed-diff-empty">No changes on disk — the edit may have been reverted, or this file is already committed.</div>';
+    } else if (res.status === 'untracked') {
+      wrap.innerHTML = '<div class="ws-changed-diff-empty">Untracked file — git has no prior version to diff against.</div>';
+    } else if (res.status === 'not-in-repo') {
+      wrap.innerHTML = '<div class="ws-changed-diff-empty">Not inside a git repository.</div>';
+    } else {
+      wrap.innerHTML = '';
+      renderDiffInto(wrap, res.diff);
+    }
+    wrap.dataset.loaded = 'true';
+  }
 }
 
 function collectConversationToolCalls(conv) {
@@ -4709,6 +4959,9 @@ function prefillChatInput(text) {
 function init() {
   // Load state
   loadState();
+  // Restore the last-used workspace tab (Edits / Files / Tools)
+  currentWorkspaceView = state.workspaceView || 'edits';
+  applyWorkspaceViewTab(currentWorkspaceView);
   if (state.currentConversationId) {
     switchConversation(state.currentConversationId);
   }
@@ -4722,6 +4975,7 @@ function init() {
   renderWsTree();
   restoreOpenFiles();
   renderToolsView();
+  renderEditsView();
   if (state.rightPanel === 'pr') openPrPanel();
   setupVerticalSplit();
   if (state.terminalOpen && !getCurrentConversation()) state.terminalOpen = false;
