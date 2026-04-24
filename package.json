@@ -1,7 +1,7 @@
 {
   "name": "claude-code-gui",
-  "version": "1.0.0",
-  "description": "Beautiful GUI for Claude Code CLI on Linux",
+  "version": "1.1.0",
+  "description": "Beautiful desktop GUI for Claude Code CLI (macOS, Linux, Windows)",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -10,6 +10,7 @@
     "build": "electron-builder --linux pacman AppImage",
     "build:appimage": "electron-builder --linux AppImage",
     "build:pacman": "electron-builder --linux pacman",
+    "build:mac": "electron-builder --mac",
     "postinstall": "electron-rebuild -f -w node-pty"
   },
   "author": {
@@ -34,7 +35,7 @@
   },
   "build": {
     "appId": "com.claude-code-gui.app",
-    "productName": "Claude Code",
+    "productName": "Code GUI",
     "linux": {
       "target": [
         "pacman",
@@ -45,13 +46,29 @@
       "synopsis": "Beautiful GUI for Claude Code CLI",
       "desktop": {
         "entry": {
-          "Name": "Claude Code",
+          "Name": "Code GUI",
           "Comment": "Beautiful GUI for Claude Code CLI",
           "Terminal": "false",
           "Type": "Application",
           "Categories": "Development;Utility;"
         }
       }
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "dmg": {
+      "writeUpdateInfo": false
     },
     "extraResources": [
       {
