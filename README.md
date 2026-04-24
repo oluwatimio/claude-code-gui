@@ -10,7 +10,7 @@ Agent-first. Black, white, and green — with a light mode. Minimal. Fast.
 
 ## Download
 
-- **macOS (Apple Silicon)** — [latest DMG](https://github.com/oluwatimio/claude-code-gui/releases/latest) (signed + notarized — just drag to Applications)
+- **macOS (Apple Silicon)** — [latest DMG](https://github.com/oluwatimio/code-gui/releases/latest) (signed + notarized — just drag to Applications)
 - **Linux** — build locally with `npm run build:pacman` or `npm run build:appimage` (see below)
 - **Intel Mac / Windows** — run from source (see below)
 
@@ -44,8 +44,8 @@ Agent-first. Black, white, and green — with a light mode. Minimal. Fast.
 ### With npm
 
 ```bash
-git clone https://github.com/oluwatimio/claude-code-gui.git
-cd claude-code-gui
+git clone https://github.com/oluwatimio/code-gui.git
+cd code-gui
 npm install
 npm start
 ```
@@ -53,8 +53,8 @@ npm start
 ### With pnpm
 
 ```bash
-git clone https://github.com/oluwatimio/claude-code-gui.git
-cd claude-code-gui
+git clone https://github.com/oluwatimio/code-gui.git
+cd code-gui
 pnpm install
 pnpm start
 ```
@@ -67,7 +67,7 @@ Packaged installers currently target Linux. macOS and Windows users run from sou
 
 ```bash
 npm run build:pacman
-sudo pacman -U dist/claude-code-gui-1.0.0.pacman
+sudo pacman -U dist/code-gui-1.1.0.pacman
 ```
 
 The app will appear in your application launcher as **Claude Code**.
@@ -122,7 +122,7 @@ Distributing to other users requires an Apple Developer signing identity and not
 ## Architecture
 
 ```
-claude-code-gui/
+code-gui/
 ├── main.js                    # Electron main process
 │                              #   - Spawns claude -p with --session-id/--resume
 │                              #   - HTTP bridge for permission approvals
