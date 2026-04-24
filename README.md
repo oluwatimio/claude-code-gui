@@ -1,4 +1,4 @@
-# Claude Code GUI
+# Code GUI
 
 A beautiful desktop GUI for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Built with Electron; runs on macOS, Linux, and Windows.
 
@@ -7,6 +7,12 @@ Agent-first. Black, white, and green — with a light mode. Minimal. Fast.
 ![Electron](https://img.shields.io/badge/Electron-41-47848F?logo=electron&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-informational)
 ![License](https://img.shields.io/badge/License-MIT-green)
+
+## Download
+
+- **macOS (Apple Silicon)** — [latest DMG](https://github.com/oluwatimio/claude-code-gui/releases/latest) (signed + notarized — just drag to Applications)
+- **Linux** — build locally with `npm run build:pacman` or `npm run build:appimage` (see below)
+- **Intel Mac / Windows** — run from source (see below)
 
 ## Features
 
