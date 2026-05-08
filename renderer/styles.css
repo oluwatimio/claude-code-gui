@@ -5018,11 +5018,13 @@ body.ws-resizing-col .side-resize {
 
 .auto-draft-body {
   width: 100%;
-  background: var(--bg-base, #0a0a0a);
-  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  /* Use the actual theme tokens — `--bg-base` doesn't exist, so the old
+     fallback (#0a0a0a) gave us black-on-light text in light mode. */
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 6px 8px;
-  color: var(--text-primary, #e0e0e0);
+  color: var(--text-primary);
   font-family: var(--font-sans, system-ui);
   font-size: 12px;
   resize: vertical;

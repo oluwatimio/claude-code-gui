@@ -1550,6 +1550,32 @@ async function ghAddReviewers(repo, number, reviewers) {
   return { ok: code === 0, error: code === 0 ? null : stderr };
 }
 
+// Drop items the user has explicitly dismissed. Used both at the end of a
+// poll and right after a manual dismiss (so the renderer's next status read
+// reflects it without waiting for the next poll).
+function applyDismissFilter(items) {
+  const out = {
+    issues: (items.issues || []).filter(i => !autoDrafts.isDismissed(contextDb, 'issue', i.repo, i.number)),
+    commentThreads: (items.commentThreads || []).filter(t => !autoDrafts.isDismissed(
+      contextDb,
+      t.kind === 'review' ? 'review-reply' : 'comment',
+      t.repo,
+      t.kind === 'review' ? t.rootId : t.prNumber,
+    )),
+    reviewRequests: (items.reviewRequests || []).filter(p => !autoDrafts.isDismissed(contextDb, 'review', p.repo, p.number)),
+  };
+  return out;
+}
+
+function broadcastItemsUpdated() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('auto:items-updated', {
+    items: autoState.items,
+    lastPollAt: autoState.lastPollAt,
+    login: autoState.login,
+  });
+}
+
 function schedulePoll() {
   if (autoState.pollTimer) {
     clearTimeout(autoState.pollTimer);
@@ -1614,17 +1640,9 @@ async function runPoll() {
     }
 
     // Filter dismissed
-    items.issues = items.issues.filter(i => !autoDrafts.isDismissed(contextDb, 'issue', i.repo, i.number));
-    items.commentThreads = items.commentThreads.filter(t => !autoDrafts.isDismissed(contextDb, t.kind === 'review' ? 'review-reply' : 'comment', t.repo, t.kind === 'review' ? t.rootId : t.prNumber));
-    items.reviewRequests = items.reviewRequests.filter(p => !autoDrafts.isDismissed(contextDb, 'review', p.repo, p.number));
-
-    autoState.items = items;
+    autoState.items = applyDismissFilter(items);
     autoState.lastPollAt = Date.now();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('auto:items-updated', {
-        items, lastPollAt: autoState.lastPollAt, login,
-      });
-    }
+    broadcastItemsUpdated();
   } catch (e) {
     console.warn('auto-mode poll failed:', e && e.message);
   } finally {
@@ -1662,6 +1680,11 @@ ipcMain.handle('auto:dismiss', async (_, payload) => {
   const { kind, repo, targetId } = payload || {};
   if (!kind || !repo || targetId == null) return { ok: false, error: 'kind/repo/targetId required' };
   autoDrafts.dismiss(contextDb, kind, repo, targetId);
+  // Update the in-memory queue immediately so the renderer's next refresh
+  // (called right after this resolves) sees the item removed without waiting
+  // for the next poll.
+  autoState.items = applyDismissFilter(autoState.items);
+  broadcastItemsUpdated();
   return { ok: true };
 });
 
