@@ -1389,24 +1389,31 @@ async function ghListAssignedIssues(login) {
     }));
 }
 
+// `gh search prs --json` does NOT support headRefName/baseRefName (those are
+// REST-only fields). Asking for them makes gh exit non-zero and we silently
+// returned []. Stick to fields the search API returns and reconstruct branch
+// names downstream only when the comments-stream actually needs them.
+const SEARCH_PRS_JSON_FIELDS = 'number,title,body,url,repository,author,updatedAt,isDraft';
+
 async function ghListMyOpenPRs(login) {
   const args = [
     'search', 'prs',
     '--author', login,
     '--state', 'open',
-    '--json', 'number,title,body,url,repository,headRefName,baseRefName,author,updatedAt,isDraft',
+    '--json', SEARCH_PRS_JSON_FIELDS,
     '--limit', '50',
   ];
-  const { code, stdout } = await runGh(args);
-  if (code !== 0) return [];
+  const { code, stdout, stderr } = await runGh(args);
+  if (code !== 0) {
+    console.warn('ghListMyOpenPRs failed:', stderr.trim());
+    return [];
+  }
   return (parseJsonSafe(stdout) || []).map(r => ({
     number: r.number,
     title: r.title,
     body: r.body || '',
     url: r.url,
     repo: r.repository ? r.repository.nameWithOwner : '',
-    headRefName: r.headRefName,
-    baseRefName: r.baseRefName,
     author: r.author,
     updatedAt: r.updatedAt,
     isDraft: !!r.isDraft,
@@ -1418,19 +1425,20 @@ async function ghListReviewRequests(login) {
     'search', 'prs',
     '--review-requested', login,
     '--state', 'open',
-    '--json', 'number,title,body,url,repository,headRefName,baseRefName,author,updatedAt,isDraft',
+    '--json', SEARCH_PRS_JSON_FIELDS,
     '--limit', '50',
   ];
-  const { code, stdout } = await runGh(args);
-  if (code !== 0) return [];
+  const { code, stdout, stderr } = await runGh(args);
+  if (code !== 0) {
+    console.warn('ghListReviewRequests failed:', stderr.trim());
+    return [];
+  }
   return (parseJsonSafe(stdout) || []).map(r => ({
     number: r.number,
     title: r.title,
     body: r.body || '',
     url: r.url,
     repo: r.repository ? r.repository.nameWithOwner : '',
-    headRefName: r.headRefName,
-    baseRefName: r.baseRefName,
     author: r.author,
     updatedAt: r.updatedAt,
     isDraft: !!r.isDraft,
