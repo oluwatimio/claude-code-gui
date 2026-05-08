@@ -40,6 +40,22 @@ test('buildClaudeArgs: built-in AskUserQuestion is disallowed so MCP ask_user is
   assert.equal(args[idx + 1], 'AskUserQuestion');
 });
 
+test('buildClaudeArgs: --effort passes valid level, ignores invalid/unset', () => {
+  const noEffort = buildClaudeArgs({});
+  assert.equal(noEffort.includes('--effort'), false);
+
+  const high = buildClaudeArgs({ effort: 'high' });
+  const idx = high.indexOf('--effort');
+  assert.notEqual(idx, -1);
+  assert.equal(high[idx + 1], 'high');
+
+  const bogus = buildClaudeArgs({ effort: 'turbo' });
+  assert.equal(bogus.includes('--effort'), false);
+
+  const nullish = buildClaudeArgs({ effort: null });
+  assert.equal(nullish.includes('--effort'), false);
+});
+
 test('buildClaudeArgs: --model only added when set', () => {
   const withoutModel = buildClaudeArgs({});
   assert.equal(withoutModel.includes('--model'), false);

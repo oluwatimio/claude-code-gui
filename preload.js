@@ -96,7 +96,7 @@ contextBridge.exposeInMainWorld('libs', {
 });
 
 contextBridge.exposeInMainWorld('claude', {
-  sendPrompt: (convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs) => ipcRenderer.send('claude:send-prompt', { convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs }),
+  sendPrompt: (convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs, effort) => ipcRenderer.send('claude:send-prompt', { convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs, effort }),
   stopGeneration: (convId) => ipcRenderer.send('claude:stop-generation', { convId }),
   onStreamStart: (callback) => ipcRenderer.on('claude:stream-start', (_, data) => callback(data)),
   onStreamDelta: (callback) => ipcRenderer.on('claude:stream-delta', (_, data) => callback(data)),
@@ -131,6 +131,42 @@ contextBridge.exposeInMainWorld('claude', {
 
 contextBridge.exposeInMainWorld('shellAPI', {
   openExternal: (url) => ipcRenderer.send('shell:open-external', url)
+});
+
+contextBridge.exposeInMainWorld('commands', {
+  list: (projectPath) => ipcRenderer.invoke('commands:list', { projectPath: projectPath || null }),
+});
+
+contextBridge.exposeInMainWorld('auto', {
+  status: () => ipcRenderer.invoke('auto:status'),
+  setConfig: (config) => ipcRenderer.invoke('auto:set-config', config),
+  pollNow: () => ipcRenderer.invoke('auto:poll-now'),
+  dismiss: (kind, repo, targetId) => ipcRenderer.invoke('auto:dismiss', { kind, repo, targetId }),
+  saveDraft: (kind, repo, targetId, data) => ipcRenderer.invoke('auto:save-draft', { kind, repo, targetId, data }),
+  listDrafts: () => ipcRenderer.invoke('auto:list-drafts'),
+  deleteDraft: (id) => ipcRenderer.invoke('auto:delete-draft', { id }),
+  sendDraft: (id) => ipcRenderer.invoke('auto:send-draft', { id }),
+  createDraftPR: (repo, base, head, title, body) => ipcRenderer.invoke('auto:create-draft-pr', { repo, base, head, title, body }),
+  addReviewers: (repo, number, reviewers) => ipcRenderer.invoke('auto:add-reviewers', { repo, number, reviewers }),
+  prChecks: (repo, number) => ipcRenderer.invoke('auto:pr-checks', { repo, number }),
+  markReady: (repo, number) => ipcRenderer.invoke('auto:mark-ready', { repo, number }),
+  prFiles: (repo, number) => ipcRenderer.invoke('auto:pr-files', { repo, number }),
+  prDetail: (repo, number) => ipcRenderer.invoke('auto:pr-detail', { repo, number }),
+  pickReviewers: (repo, number, projectPath) => ipcRenderer.invoke('auto:pick-reviewers', { repo, number, projectPath }),
+  watchPR: (payload) => ipcRenderer.invoke('auto:watch-pr', payload),
+  listWatched: () => ipcRenderer.invoke('auto:list-watched'),
+  unwatch: (repo, number) => ipcRenderer.invoke('auto:unwatch-pr', { repo, number }),
+  onItemsUpdated: (cb) => ipcRenderer.on('auto:items-updated', (_, data) => cb(data)),
+  onWatchedUpdated: (cb) => ipcRenderer.on('auto:watched-updated', (_, data) => cb(data)),
+  onPRReady: (cb) => ipcRenderer.on('auto:pr-ready', (_, data) => cb(data)),
+});
+
+contextBridge.exposeInMainWorld('appState', {
+  load: () => ipcRenderer.invoke('state:load'),
+  save: (payload) => ipcRenderer.invoke('state:save', payload),
+  saveConversation: (conversation, position) => ipcRenderer.invoke('state:save-conversation', { conversation, position }),
+  deleteConversation: (id) => ipcRenderer.invoke('state:delete-conversation', { id }),
+  setSetting: (key, value) => ipcRenderer.invoke('state:set-setting', { key, value }),
 });
 
 contextBridge.exposeInMainWorld('project', {

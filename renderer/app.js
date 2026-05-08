@@ -15,6 +15,7 @@ const state = {
   terminalOpen: false,
   terminalHeight: 240,
   defaultModel: null, // last model the user picked; used as initial model for new conversations
+  defaultEffort: null, // last reasoning-effort level (low|medium|high|xhigh|max), null = CLI default
   themePreference: 'system', // 'system' | 'light' | 'dark'
 };
 
@@ -67,6 +68,9 @@ const extraDirsList = document.getElementById('extra-dirs-list');
 const addDirBtn = document.getElementById('add-dir-btn');
 const attachBtn = document.getElementById('attach-btn');
 const attachmentsListEl = document.getElementById('attachments-list');
+const effortSelector = document.getElementById('effort-selector');
+const effortLabel = document.getElementById('effort-label');
+const effortMenu = document.getElementById('effort-menu');
 const modelSelector = document.getElementById('model-selector');
 const modelLabel = document.getElementById('model-label');
 const modelMenu = document.getElementById('model-menu');
@@ -142,6 +146,21 @@ function findModelLabel(value) {
   if (value == null) return 'Default';
   const m = MODELS.find(o => !o.section && o.value === value);
   return m ? m.short : value;
+}
+
+// Effort options. `value: null` = don't pass --effort (use CLI default).
+const EFFORTS = [
+  { label: 'Default',     short: 'Effort',  value: null,    desc: "use CLI default" },
+  { label: 'Low',         short: 'Low',     value: 'low',   desc: 'fastest, cheapest' },
+  { label: 'Medium',      short: 'Medium',  value: 'medium',desc: 'balanced' },
+  { label: 'High',        short: 'High',    value: 'high',  desc: 'thorough' },
+  { label: 'Extra high',  short: 'X-High',  value: 'xhigh', desc: 'longer reasoning' },
+  { label: 'Max',         short: 'Max',     value: 'max',   desc: 'all-out' },
+];
+
+function findEffortLabel(value) {
+  const e = EFFORTS.find(o => o.value === value);
+  return e ? e.short : 'Effort';
 }
 
 // ===== Helpers =====
@@ -446,6 +465,56 @@ function closeModelMenu() {
   modelSelector.classList.remove('open');
 }
 
+function renderEffortSelector() {
+  if (!effortSelector) return;
+  const conv = getCurrentConversation();
+  const current = conv ? (conv.effort ?? null) : (state.defaultEffort ?? null);
+  effortLabel.textContent = findEffortLabel(current);
+  effortSelector.classList.toggle('has-value', current != null);
+  effortSelector.title = current == null
+    ? 'Reasoning effort: CLI default · click to change'
+    : `Effort: ${current} · click to change`;
+}
+
+function buildEffortMenu() {
+  const conv = getCurrentConversation();
+  const current = conv ? (conv.effort ?? null) : (state.defaultEffort ?? null);
+  effortMenu.innerHTML = '';
+  for (const entry of EFFORTS) {
+    const opt = document.createElement('div');
+    opt.className = 'model-option' + (entry.value === current ? ' active' : '');
+    const lbl = document.createElement('span');
+    lbl.className = 'model-option-label';
+    lbl.textContent = entry.label;
+    const id = document.createElement('span');
+    id.className = 'model-option-id';
+    id.textContent = entry.desc;
+    opt.appendChild(lbl);
+    opt.appendChild(id);
+    opt.onclick = () => {
+      let c = getCurrentConversation();
+      if (!c) c = createConversation('New Chat');
+      c.effort = entry.value;
+      state.defaultEffort = entry.value;
+      saveState();
+      renderEffortSelector();
+      closeEffortMenu();
+    };
+    effortMenu.appendChild(opt);
+  }
+}
+
+function openEffortMenu() {
+  buildEffortMenu();
+  effortMenu.classList.remove('hidden');
+  effortSelector.classList.add('open');
+}
+
+function closeEffortMenu() {
+  effortMenu.classList.add('hidden');
+  effortSelector.classList.remove('open');
+}
+
 // ===== Message Rendering =====
 function createThinkingBlock(text, expanded = false) {
   const wrap = document.createElement('div');
@@ -716,6 +785,7 @@ function createConversation(title) {
     worktreeBranch: null,
     pendingNewSession: false,
     model: state.defaultModel ?? null,
+    effort: state.defaultEffort ?? null,
   };
   state.conversations.unshift(conv);
   state.currentConversationId = conv.id;
@@ -771,6 +841,7 @@ function switchConversation(id) {
   renderProjectPill();
   refreshBranch();
   renderModelSelector();
+  renderEffortSelector();
   renderContextUsage();
   renderWsTabs();
   renderWsTree();
@@ -1072,6 +1143,7 @@ function newChat() {
   renderProjectPill();
   refreshBranch();
   renderModelSelector();
+  renderEffortSelector();
   if (wsTilesEl) wsTilesEl.innerHTML = '';
   renderWsTabs();
   renderWsTree();
@@ -1082,10 +1154,21 @@ function newChat() {
 }
 
 // ===== Persistence =====
-function saveState() {
-  try {
-    localStorage.setItem('claude-gui-state', JSON.stringify({
-      conversations: state.conversations,
+//
+// Conversations + settings are persisted in SQLite via IPC (see lib/state-store.js).
+// `saveState()` is fire-and-forget and debounced — call it freely after any
+// mutation, the actual write coalesces.
+//
+// `localStorage` is still consulted on first run for one-time migration to the DB.
+const SAVE_DEBOUNCE_MS = 250;
+let saveDebounceTimer = null;
+let savePending = false;
+let saveInflight = null;
+
+function _stateSnapshotForPersist() {
+  return {
+    conversations: state.conversations,
+    settings: {
       currentConversationId: state.currentConversationId,
       yolo: state.yolo,
       rightPanel: state.rightPanel,
@@ -1100,78 +1183,161 @@ function saveState() {
       terminalOpen: state.terminalOpen,
       terminalHeight: state.terminalHeight,
       defaultModel: state.defaultModel,
+      defaultEffort: state.defaultEffort,
       themePreference: state.themePreference,
-    }));
-  } catch (e) {
-    // Silently fail on storage quota
+    },
+  };
+}
+
+async function _flushState() {
+  // Coalesce: if a save is already running, mark dirty so we re-flush after.
+  if (saveInflight) { savePending = true; return saveInflight; }
+  const payload = _stateSnapshotForPersist();
+  saveInflight = (async () => {
+    try {
+      if (window.appState && window.appState.save) {
+        await window.appState.save(payload);
+      } else {
+        // Fallback to localStorage if appState IPC isn't wired (defensive)
+        try { localStorage.setItem('claude-gui-state', JSON.stringify({ ...payload.settings, conversations: payload.conversations })); } catch (e) {}
+      }
+    } catch (e) {
+      // Persistence errors shouldn't crash the UI; log and continue.
+      console.warn('saveState failed:', e);
+    } finally {
+      saveInflight = null;
+      if (savePending) {
+        savePending = false;
+        // Schedule another flush soon — there were more mutations during the write.
+        scheduleSaveState();
+      }
+    }
+  })();
+  return saveInflight;
+}
+
+function scheduleSaveState() {
+  if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+  saveDebounceTimer = setTimeout(() => {
+    saveDebounceTimer = null;
+    _flushState();
+  }, SAVE_DEBOUNCE_MS);
+}
+
+function saveState() {
+  // Public entry point — debounced.
+  scheduleSaveState();
+}
+
+// Flush synchronously on close so we don't lose the last few seconds of edits.
+window.addEventListener('beforeunload', () => {
+  if (saveDebounceTimer) {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = null;
+  }
+  // Best-effort — beforeunload doesn't await, but the IPC send is queued before
+  // the renderer is torn down so the main process gets it.
+  try { _flushState(); } catch (e) {}
+});
+
+// Apply a {conversations, settings} payload to the in-memory `state`.
+// Tolerates partial / malformed data — each field validates itself.
+function _hydrateStateFromPayload(payload) {
+  const data = (payload && payload.settings) ? payload.settings : (payload || {});
+  state.conversations = Array.isArray(payload && payload.conversations)
+    ? payload.conversations
+    : [];
+
+  if (data.currentConversationId !== undefined) state.currentConversationId = data.currentConversationId;
+  state.yolo = !!data.yolo;
+
+  // Migrate legacy state.workspaceOpen → state.rightPanel
+  if (data.rightPanel === 'workspace' || data.rightPanel === 'pr' || data.rightPanel === null) {
+    state.rightPanel = data.rightPanel;
+  } else if (data.workspaceOpen) {
+    state.rightPanel = 'workspace';
+  } else if (data.rightPanel === undefined) {
+    // leave default
+  } else {
+    state.rightPanel = null;
+  }
+
+  if (data.prFilter === 'all' || data.prFilter === 'mine') state.prFilter = data.prFilter;
+  if (typeof data.prPollMinutes === 'number' && data.prPollMinutes >= 0 && data.prPollMinutes <= 60) {
+    state.prPollMinutes = data.prPollMinutes;
+  }
+  if (typeof data.preferredIde === 'string' && data.preferredIde) state.preferredIde = data.preferredIde;
+  if (data.workspaceView === 'edits' || data.workspaceView === 'workspace' || data.workspaceView === 'tools') {
+    state.workspaceView = data.workspaceView;
+  }
+  if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) state.wsTreeHeight = data.wsTreeHeight;
+  if (typeof data.sidebarWidth === 'number' && data.sidebarWidth >= 180) state.sidebarWidth = data.sidebarWidth;
+  if (typeof data.workspaceWidth === 'number' && data.workspaceWidth >= 320) state.workspaceWidth = data.workspaceWidth;
+  if (typeof data.prPanelWidth === 'number' && data.prPanelWidth >= 340) state.prPanelWidth = data.prPanelWidth;
+  state.terminalOpen = !!data.terminalOpen;
+  if (typeof data.terminalHeight === 'number' && data.terminalHeight >= 120) state.terminalHeight = data.terminalHeight;
+  if (data.defaultModel === null || typeof data.defaultModel === 'string') state.defaultModel = data.defaultModel;
+  if (data.defaultEffort === null || typeof data.defaultEffort === 'string') state.defaultEffort = data.defaultEffort;
+  if (data.themePreference === 'system' || data.themePreference === 'light' || data.themePreference === 'dark') {
+    state.themePreference = data.themePreference;
+  }
+
+  // Reset any in-flight stream flags — processes don't survive app restarts
+  for (const conv of state.conversations) {
+    conv.streaming = false;
+    conv.streamContent = '';
+    conv.streamThinking = '';
+    conv.streamFilesAccessed = [];
+    conv.streamToolCalls = [];
+    if (conv.worktreePath === undefined) conv.worktreePath = null;
+    if (conv.worktreeBranch === undefined) conv.worktreeBranch = null;
   }
 }
 
-function loadState() {
+// Read the legacy localStorage blob (if any) and return it shaped as a DB payload.
+// Returns null when there's nothing to migrate.
+function _readLegacyLocalStorageState() {
   try {
     const saved = localStorage.getItem('claude-gui-state');
-    if (saved) {
-      const data = JSON.parse(saved);
-      state.conversations = data.conversations || [];
-      state.currentConversationId = data.currentConversationId;
-      state.yolo = !!data.yolo;
-      // Migrate legacy state.workspaceOpen → state.rightPanel
-      if (data.rightPanel === 'workspace' || data.rightPanel === 'pr' || data.rightPanel === null) {
-        state.rightPanel = data.rightPanel;
-      } else if (data.workspaceOpen) {
-        state.rightPanel = 'workspace';
-      } else {
-        state.rightPanel = null;
-      }
-      if (data.prFilter === 'all' || data.prFilter === 'mine') {
-        state.prFilter = data.prFilter;
-      }
-      if (typeof data.prPollMinutes === 'number' && data.prPollMinutes >= 0 && data.prPollMinutes <= 60) {
-        state.prPollMinutes = data.prPollMinutes;
-      }
-      if (typeof data.preferredIde === 'string' && data.preferredIde) {
-        state.preferredIde = data.preferredIde;
-      }
-      if (data.workspaceView === 'edits' || data.workspaceView === 'workspace' || data.workspaceView === 'tools') {
-        state.workspaceView = data.workspaceView;
-      }
-      if (typeof data.wsTreeHeight === 'number' && data.wsTreeHeight > 80) {
-        state.wsTreeHeight = data.wsTreeHeight;
-      }
-      if (typeof data.sidebarWidth === 'number' && data.sidebarWidth >= 180) {
-        state.sidebarWidth = data.sidebarWidth;
-      }
-      if (typeof data.workspaceWidth === 'number' && data.workspaceWidth >= 320) {
-        state.workspaceWidth = data.workspaceWidth;
-      }
-      if (typeof data.prPanelWidth === 'number' && data.prPanelWidth >= 340) {
-        state.prPanelWidth = data.prPanelWidth;
-      }
-      state.terminalOpen = !!data.terminalOpen;
-      if (typeof data.terminalHeight === 'number' && data.terminalHeight >= 120) {
-        state.terminalHeight = data.terminalHeight;
-      }
-      if (data.defaultModel === null || typeof data.defaultModel === 'string') {
-        state.defaultModel = data.defaultModel;
-      }
-      if (data.themePreference === 'system' || data.themePreference === 'light' || data.themePreference === 'dark') {
-        state.themePreference = data.themePreference;
-      }
+    if (!saved) return null;
+    const data = JSON.parse(saved);
+    if (!data || typeof data !== 'object') return null;
+    const { conversations, ...settings } = data;
+    return {
+      conversations: Array.isArray(conversations) ? conversations : [],
+      settings,
+    };
+  } catch (e) {
+    return null;
+  }
+}
 
-      // Reset any in-flight stream flags — processes don't survive app restarts
-      for (const conv of state.conversations) {
-        conv.streaming = false;
-        conv.streamContent = '';
-        conv.streamThinking = '';
-        conv.streamFilesAccessed = [];
-        conv.streamToolCalls = [];
-        if (conv.worktreePath === undefined) conv.worktreePath = null;
-        if (conv.worktreeBranch === undefined) conv.worktreeBranch = null;
-      }
+async function loadState() {
+  // Prefer DB; fall back to (and migrate from) the legacy localStorage blob.
+  let payload = null;
+  try {
+    if (window.appState && window.appState.load) {
+      payload = await window.appState.load();
     }
   } catch (e) {
-    // Start fresh
+    payload = null;
   }
+
+  const dbEmpty = !payload || (!payload.conversations || payload.conversations.length === 0)
+    && (!payload.settings || Object.keys(payload.settings).length === 0);
+
+  if (dbEmpty) {
+    const legacy = _readLegacyLocalStorageState();
+    if (legacy) {
+      _hydrateStateFromPayload(legacy);
+      // Persist the migration so we never need to read localStorage again.
+      try { await _flushState(); } catch (e) {}
+      try { localStorage.removeItem('claude-gui-state'); } catch (e) {}
+      return;
+    }
+  }
+
+  if (payload) _hydrateStateFromPayload(payload);
 }
 
 // ===== Streaming Integration (per-conversation) =====
@@ -1234,7 +1400,7 @@ function sendMessage(prompt) {
 
   const isFirstMessage = sessionLogic.shouldStartFreshSession(conv);
   conv.pendingNewSession = false;
-  window.claude.sendPrompt(conv.id, finalPrompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? []);
+  window.claude.sendPrompt(conv.id, finalPrompt, conv.sessionId, isFirstMessage, state.yolo, effectiveProjectPath(conv), conv.model ?? null, conv.extraDirs ?? [], conv.effort ?? null);
   renderConversationList();
 }
 
@@ -1406,7 +1572,82 @@ function handleStreamEnd(data) {
   }
   notifyChatFinished(data.convId, { kind: 'done', detail });
 
+  // Phase 2 finisher: if this conversation was started for an auto-mode issue,
+  // open a draft PR now that the agent has (presumably) committed + pushed.
+  // The actual git operations are the agent's responsibility — we only handle
+  // the GitHub-side PR open after the agent reports success.
+  maybeOpenDraftPRForAutoIssue(data.convId).catch(err => console.warn('auto-issue PR finish failed:', err));
+
   if (isCurrentConv(data.convId)) setStatus('ready', 'Ready');
+}
+
+async function maybeOpenDraftPRForAutoIssue(convId) {
+  const conv = getConversation(convId);
+  if (!conv || !conv.autoIssue || conv.autoIssue.prCreated) return;
+  const ai = conv.autoIssue;
+  // Heuristic: only open a PR if the agent's last visible turn looks like it
+  // pushed. If it didn't, the user probably stopped early or the agent failed —
+  // surface a notice instead of opening a broken PR.
+  const lastAssistant = [...(conv.messages || [])].reverse().find(m => m.role === 'assistant');
+  const transcript = lastAssistant ? (lastAssistant.content || '') : '';
+  const looksPushed = /git push|pushed to origin|ready (?:for )?review/i.test(transcript);
+  if (!looksPushed) {
+    messagesEl.appendChild(createMessageEl(
+      'error',
+      `Auto-mode: skipping draft-PR open — couldn't confirm the branch was pushed. ` +
+      `Push manually with \`git push -u origin ${ai.branch}\` and retry from the Auto panel.`,
+    ));
+    scrollToBottom();
+    return;
+  }
+
+  const title = `Closes #${ai.number}: ${ai.title}`.slice(0, 250);
+  const body = [
+    `Closes #${ai.number}.`,
+    '',
+    `Auto-generated draft PR for [issue #${ai.number}](${ai.url}).`,
+    'Marked ready for review automatically once CI is green.',
+  ].join('\n');
+
+  const result = await window.auto.createDraftPR(ai.repo, null, ai.branch, title, body);
+  if (!result || !result.ok) {
+    messagesEl.appendChild(createMessageEl(
+      'error',
+      `Auto-mode: failed to open draft PR — ${(result && result.error) || 'unknown error'}`,
+    ));
+    scrollToBottom();
+    return;
+  }
+
+  // Parse the PR number out of the URL gh returned.
+  const url = (result.url || '').trim();
+  const m = url.match(/\/pull\/(\d+)/);
+  const number = m ? Number(m[1]) : null;
+  ai.prCreated = true;
+  ai.prUrl = url;
+  ai.prNumber = number;
+  saveState();
+
+  if (number) {
+    // Phase 3: hand off to the CI watcher.
+    try {
+      await window.auto.watchPR({
+        repo: ai.repo,
+        number,
+        branch: ai.branch,
+        issueNumber: ai.number,
+        projectPath: conv.projectPath || null,
+        title,
+      });
+    } catch (e) { console.warn('watchPR failed:', e); }
+  }
+
+  messagesEl.appendChild(createMessageEl(
+    'assistant',
+    `Opened draft PR: ${url}\n\nWatching CI — when checks pass I'll request reviewers and flip it ready-for-review.`,
+  ));
+  scrollToBottom();
+  refreshAutoPanel();
 }
 
 function handleStreamError(data) {
@@ -1798,6 +2039,159 @@ function renderFilePicker() {
   });
   filePickerEl.classList.remove('hidden');
   const selEl = filePickerEl.children[filePicker.selected];
+  if (selEl && selEl.scrollIntoView) selEl.scrollIntoView({ block: 'nearest' });
+}
+
+// ===== Slash-command popover =====
+
+const slashPopoverEl = document.getElementById('slash-popover');
+const slashPicker = {
+  open: false,
+  query: '',
+  results: [],     // [{name, source, description, argHint}]
+  selected: 0,
+  cache: new Map(), // projectKey -> Promise<Array>
+};
+
+function getProjectKeyForCommands() {
+  const conv = getCurrentConversation();
+  return effectiveProjectPath(conv) || '__no_project__';
+}
+
+async function loadSlashCommandsForCurrent() {
+  const conv = getCurrentConversation();
+  const projectPath = effectiveProjectPath(conv);
+  const key = projectPath || '__no_project__';
+  if (!slashPicker.cache.has(key)) {
+    const p = window.commands.list(projectPath).catch(() => []);
+    slashPicker.cache.set(key, p);
+  }
+  return slashPicker.cache.get(key);
+}
+
+function invalidateSlashCommandsCache() {
+  slashPicker.cache.clear();
+}
+
+function detectSlashTrigger() {
+  if (!inputEl || !slashPopoverEl) return;
+  const val = inputEl.value;
+  // Only fire when slash is at the very start — matches CLI semantics, and keeps
+  // it from competing with `@`-mentions or accidental mid-text slashes.
+  if (!val.startsWith('/')) { closeSlashPopover(); return; }
+  // Disallow newlines in the slash query
+  const firstNewline = val.indexOf('\n');
+  const head = firstNewline === -1 ? val : val.slice(0, firstNewline);
+  // Take everything after `/` up to the first space
+  const space = head.indexOf(' ');
+  const query = (space === -1 ? head : head.slice(0, space)).slice(1);
+  // Names allow letters/digits/dash/underscore/colon (for plugin:cmd in the future)
+  if (!/^[a-zA-Z0-9_:\-]*$/.test(query)) { closeSlashPopover(); return; }
+  openSlashPopover(query);
+}
+
+async function openSlashPopover(query) {
+  slashPicker.open = true;
+  slashPicker.query = query;
+  const all = await loadSlashCommandsForCurrent();
+  if (!slashPicker.open || slashPicker.query !== query) return;
+  slashPicker.results = filterSlashCommands(all || [], query);
+  slashPicker.selected = 0;
+  renderSlashPopover();
+}
+
+function filterSlashCommands(all, query) {
+  const q = (query || '').toLowerCase();
+  if (!q) return all.slice(0, 50);
+  // Prefix match wins; then substring; then nothing.
+  const prefix = [];
+  const sub = [];
+  for (const c of all) {
+    const n = c.name.toLowerCase();
+    if (n.startsWith(q)) prefix.push(c);
+    else if (n.includes(q)) sub.push(c);
+  }
+  return prefix.concat(sub).slice(0, 50);
+}
+
+function closeSlashPopover() {
+  if (!slashPicker.open) return;
+  slashPicker.open = false;
+  slashPicker.query = '';
+  slashPicker.results = [];
+  slashPicker.selected = 0;
+  if (slashPopoverEl) slashPopoverEl.classList.add('hidden');
+}
+
+function moveSlashSelection(delta) {
+  if (!slashPicker.open || !slashPicker.results.length) return;
+  const n = slashPicker.results.length;
+  slashPicker.selected = ((slashPicker.selected + delta) % n + n) % n;
+  renderSlashPopover();
+}
+
+function acceptSlashSelection() {
+  if (!slashPicker.open || !slashPicker.results.length) return false;
+  const pick = slashPicker.results[slashPicker.selected];
+  if (!pick) return false;
+  // Replace the leading "/<query>" with "/<name> "
+  const val = inputEl.value;
+  const space = val.indexOf(' ');
+  const newline = val.indexOf('\n');
+  const splitAt = [space, newline].filter(i => i >= 0).sort((a, b) => a - b)[0];
+  const rest = splitAt == null ? '' : val.slice(splitAt);
+  // Add a trailing space if there's no separator yet, so user can continue typing args
+  const insertion = `/${pick.name}`;
+  const needsSpace = pick.argHint && (rest === '' || (!rest.startsWith(' ') && !rest.startsWith('\n')));
+  inputEl.value = insertion + (needsSpace ? ' ' : '') + rest;
+  const caret = (insertion + (needsSpace ? ' ' : '')).length;
+  inputEl.setSelectionRange(caret, caret);
+  closeSlashPopover();
+  autoResize();
+  return true;
+}
+
+function renderSlashPopover() {
+  if (!slashPopoverEl) return;
+  if (!slashPicker.open) { slashPopoverEl.classList.add('hidden'); return; }
+  slashPopoverEl.innerHTML = '';
+  if (!slashPicker.results.length) {
+    const empty = document.createElement('div');
+    empty.className = 'slash-empty';
+    empty.textContent = slashPicker.query
+      ? `No commands match “/${slashPicker.query}”`
+      : 'No slash commands found. Add .md files in ~/.claude/commands/';
+    slashPopoverEl.appendChild(empty);
+    slashPopoverEl.classList.remove('hidden');
+    return;
+  }
+  slashPicker.results.forEach((entry, idx) => {
+    const item = document.createElement('div');
+    item.className = 'slash-item' + (idx === slashPicker.selected ? ' selected' : '');
+    const sourceLabel = entry.source === 'project'
+      ? 'project'
+      : entry.source === 'user'
+        ? 'user'
+        : entry.source.startsWith('plugin:')
+          ? entry.source.slice(7)
+          : entry.source;
+
+    item.innerHTML = `
+      <span class="slash-name">/${escapeHtml(entry.name)}</span>
+      ${entry.argHint ? `<span class="slash-arg-hint">${escapeHtml(entry.argHint)}</span>` : ''}
+      <span class="slash-source">${escapeHtml(sourceLabel)}</span>
+      ${entry.description ? `<span class="slash-desc">${escapeHtml(entry.description)}</span>` : ''}
+    `;
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      slashPicker.selected = idx;
+      acceptSlashSelection();
+      inputEl.focus();
+    });
+    slashPopoverEl.appendChild(item);
+  });
+  slashPopoverEl.classList.remove('hidden');
+  const selEl = slashPopoverEl.children[slashPicker.selected];
   if (selEl && selEl.scrollIntoView) selEl.scrollIntoView({ block: 'nearest' });
 }
 
@@ -4190,13 +4584,17 @@ let currentSidebarTab = 'chats';
 let memorySearchDebounce = null;
 
 function switchSidebarTab(name) {
-  if (name !== 'chats' && name !== 'memories') return;
+  if (name !== 'chats' && name !== 'memories' && name !== 'auto') return;
   currentSidebarTab = name;
   sidebarTabs.forEach(t => t.classList.toggle('active', t.getAttribute('data-tab') === name));
   chatsPanelEl.classList.toggle('active', name === 'chats');
   memoriesPanelEl.classList.toggle('active', name === 'memories');
+  const autoPanelEl = document.getElementById('auto-panel');
+  if (autoPanelEl) autoPanelEl.classList.toggle('active', name === 'auto');
   if (name === 'memories') {
     renderMemories(memorySearchEl.value.trim());
+  } else if (name === 'auto') {
+    refreshAutoPanel();
   }
 }
 
@@ -5064,6 +5462,579 @@ function prefillChatInput(text) {
   try { inputEl.setSelectionRange(end, end); } catch (e) {}
 }
 
+// ===== Auto-mode panel =====
+//
+// Renders the polled queue of actionable GitHub items (issues assigned to me,
+// unanswered PR comments, PR review requests) plus any saved drafts. Drafting
+// content runs an off-screen Claude one-shot in the renderer; the result is
+// stored via IPC and only posts to GitHub when the user clicks Send.
+
+const autoUI = {
+  enabled: false,
+  config: null,
+  items: { issues: [], commentThreads: [], reviewRequests: [] },
+  drafts: [],
+  login: null,
+  lastPollAt: 0,
+  drafting: new Set(), // dedup keys for in-flight drafting work
+};
+
+const autoEnabledEl = document.getElementById('auto-enabled');
+const autoStreamTogglesEl = document.getElementById('auto-stream-toggles');
+const autoMetaEl = document.getElementById('auto-meta');
+const autoQueueEl = document.getElementById('auto-queue');
+const autoDraftsListEl = document.getElementById('auto-drafts-list');
+const autoTabBadgeEl = document.getElementById('auto-tab-badge');
+const autoPollNowBtn = document.getElementById('auto-poll-now');
+const autoSettingsToggleBtn = document.getElementById('auto-settings-toggle');
+const autoSettingsEl = document.getElementById('auto-settings');
+const autoModelSelectEl = document.getElementById('auto-model');
+const autoEffortSelectEl = document.getElementById('auto-effort');
+const autoIntervalSelectEl = document.getElementById('auto-interval');
+
+async function refreshAutoPanel() {
+  if (!window.auto) return;
+  try {
+    const status = await window.auto.status();
+    autoUI.config = status.config;
+    autoUI.items = status.items || { issues: [], commentThreads: [], reviewRequests: [] };
+    autoUI.drafts = status.drafts || [];
+    autoUI.login = status.login;
+    autoUI.lastPollAt = status.lastPollAt;
+    renderAutoPanel();
+  } catch (e) {}
+}
+
+function renderAutoPanel() {
+  if (!autoEnabledEl) return;
+  autoEnabledEl.checked = !!(autoUI.config && autoUI.config.enabled);
+  if (autoStreamTogglesEl && autoUI.config && autoUI.config.streams) {
+    for (const cb of autoStreamTogglesEl.querySelectorAll('input[data-stream]')) {
+      cb.checked = !!autoUI.config.streams[cb.dataset.stream];
+    }
+  }
+  if (autoMetaEl) {
+    const last = autoUI.lastPollAt ? new Date(autoUI.lastPollAt).toLocaleTimeString() : 'never';
+    const who = autoUI.login ? `@${autoUI.login}` : 'not signed in';
+    autoMetaEl.textContent = `${who} · last poll ${last}`;
+  }
+  renderAutoSettings();
+  renderAutoQueue();
+  renderAutoDrafts();
+  updateAutoBadge();
+}
+
+function renderAutoSettings() {
+  // Populate the Model dropdown lazily so it always reflects the current
+  // MODELS list. Skip section headers; otherwise option `value=""` round-trips
+  // as null (empty string is interchangeable with null on the wire).
+  if (autoModelSelectEl && autoModelSelectEl.options.length === 0) {
+    for (const m of MODELS) {
+      if (m.section) continue;
+      const opt = document.createElement('option');
+      opt.value = m.value == null ? '' : m.value;
+      opt.textContent = m.label;
+      autoModelSelectEl.appendChild(opt);
+    }
+  }
+  if (autoEffortSelectEl && autoEffortSelectEl.options.length === 0) {
+    for (const e of EFFORTS) {
+      const opt = document.createElement('option');
+      opt.value = e.value == null ? '' : e.value;
+      opt.textContent = e.label;
+      autoEffortSelectEl.appendChild(opt);
+    }
+  }
+  if (autoModelSelectEl) {
+    autoModelSelectEl.value = (autoUI.config && autoUI.config.draftModel) || '';
+  }
+  if (autoEffortSelectEl) {
+    autoEffortSelectEl.value = (autoUI.config && autoUI.config.draftEffort) || '';
+  }
+  if (autoIntervalSelectEl) {
+    const sec = (autoUI.config && Number(autoUI.config.intervalSec)) || 180;
+    // Snap to the nearest preset; if no preset matches, the browser keeps the
+    // raw value (so a programmatic config change still round-trips).
+    autoIntervalSelectEl.value = String(sec);
+  }
+}
+
+function updateAutoBadge() {
+  if (!autoTabBadgeEl) return;
+  const total = (autoUI.items.issues || []).length
+    + (autoUI.items.commentThreads || []).length
+    + (autoUI.items.reviewRequests || []).length
+    + (autoUI.drafts || []).length;
+  autoTabBadgeEl.textContent = String(total);
+  autoTabBadgeEl.classList.toggle('hidden', total === 0);
+}
+
+function renderAutoQueue() {
+  if (!autoQueueEl) return;
+  autoQueueEl.innerHTML = '';
+  const sections = [
+    { title: 'Issues assigned to you', items: autoUI.items.issues || [], render: renderIssueRow },
+    { title: 'Unanswered PR threads', items: autoUI.items.commentThreads || [], render: renderCommentRow },
+    { title: 'Review requested', items: autoUI.items.reviewRequests || [], render: renderReviewRow },
+  ];
+  let nonEmpty = 0;
+  for (const section of sections) {
+    if (!section.items.length) continue;
+    nonEmpty++;
+    const head = document.createElement('div');
+    head.className = 'auto-section-title';
+    head.textContent = `${section.title} · ${section.items.length}`;
+    autoQueueEl.appendChild(head);
+    for (const item of section.items) {
+      autoQueueEl.appendChild(section.render(item));
+    }
+  }
+  if (!nonEmpty) {
+    const empty = document.createElement('div');
+    empty.className = 'auto-empty';
+    empty.textContent = autoUI.config && autoUI.config.enabled
+      ? 'Queue is clear. Polling…'
+      : 'Auto-mode is off. Toggle on to start polling.';
+    autoQueueEl.appendChild(empty);
+  }
+}
+
+function renderIssueRow(issue) {
+  const row = document.createElement('div');
+  row.className = 'auto-item';
+  row.innerHTML = `
+    <div class="auto-item-head">
+      <a class="auto-item-title" href="${escapeHtml(issue.url || '#')}" data-extlink>${escapeHtml(issue.title || '')}</a>
+      <span class="auto-item-meta">${escapeHtml(issue.repo || '')} #${issue.number}</span>
+    </div>
+    <div class="auto-item-actions">
+      <button class="auto-btn primary" data-action="start-issue">Start in worktree</button>
+      <button class="auto-btn" data-action="dismiss">Dismiss</button>
+    </div>
+  `;
+  row.querySelector('[data-action="start-issue"]').addEventListener('click', () => startIssueWorkflow(issue));
+  row.querySelector('[data-action="dismiss"]').addEventListener('click', async () => {
+    await window.auto.dismiss('issue', issue.repo, issue.number);
+    refreshAutoPanel();
+  });
+  row.querySelector('[data-extlink]').addEventListener('click', (e) => {
+    e.preventDefault();
+    if (window.shellAPI) window.shellAPI.openExternal(issue.url);
+  });
+  return row;
+}
+
+function renderCommentRow(thread) {
+  const row = document.createElement('div');
+  row.className = 'auto-item';
+  const latest = thread.latest || {};
+  const user = (latest.user && latest.user.login) || (latest.author && latest.author.login) || 'someone';
+  const summary = (latest.body || '').slice(0, 140).replace(/\s+/g, ' ');
+  const where = thread.kind === 'review'
+    ? `${thread.path || 'inline'}${thread.line ? ':' + thread.line : ''}`
+    : 'top-level';
+  row.innerHTML = `
+    <div class="auto-item-head">
+      <a class="auto-item-title" href="${escapeHtml(thread.prUrl || '#')}" data-extlink>${escapeHtml(thread.prTitle || '')}</a>
+      <span class="auto-item-meta">${escapeHtml(thread.repo || '')} #${thread.prNumber} · ${escapeHtml(where)}</span>
+    </div>
+    <div class="auto-item-quote">@${escapeHtml(user)}: ${escapeHtml(summary)}</div>
+    <div class="auto-item-actions">
+      <button class="auto-btn primary" data-action="draft-reply">Draft reply</button>
+      <button class="auto-btn" data-action="dismiss">Dismiss</button>
+    </div>
+  `;
+  row.querySelector('[data-action="draft-reply"]').addEventListener('click', () => draftReplyForThread(thread));
+  row.querySelector('[data-action="dismiss"]').addEventListener('click', async () => {
+    const kind = thread.kind === 'review' ? 'review-reply' : 'comment';
+    const targetId = thread.kind === 'review' ? thread.rootId : thread.prNumber;
+    await window.auto.dismiss(kind, thread.repo, targetId);
+    refreshAutoPanel();
+  });
+  row.querySelector('[data-extlink]').addEventListener('click', (e) => {
+    e.preventDefault();
+    if (window.shellAPI) window.shellAPI.openExternal(thread.prUrl);
+  });
+  return row;
+}
+
+function renderReviewRow(pr) {
+  const row = document.createElement('div');
+  row.className = 'auto-item';
+  row.innerHTML = `
+    <div class="auto-item-head">
+      <a class="auto-item-title" href="${escapeHtml(pr.url || '#')}" data-extlink>${escapeHtml(pr.title || '')}</a>
+      <span class="auto-item-meta">${escapeHtml(pr.repo || '')} #${pr.number}</span>
+    </div>
+    <div class="auto-item-actions">
+      <button class="auto-btn primary" data-action="draft-review">Draft review</button>
+      <button class="auto-btn" data-action="dismiss">Dismiss</button>
+    </div>
+  `;
+  row.querySelector('[data-action="draft-review"]').addEventListener('click', () => draftReviewForPR(pr));
+  row.querySelector('[data-action="dismiss"]').addEventListener('click', async () => {
+    await window.auto.dismiss('review', pr.repo, pr.number);
+    refreshAutoPanel();
+  });
+  row.querySelector('[data-extlink]').addEventListener('click', (e) => {
+    e.preventDefault();
+    if (window.shellAPI) window.shellAPI.openExternal(pr.url);
+  });
+  return row;
+}
+
+function renderAutoDrafts() {
+  if (!autoDraftsListEl) return;
+  autoDraftsListEl.innerHTML = '';
+  if (!autoUI.drafts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'auto-empty';
+    empty.textContent = 'No drafts.';
+    autoDraftsListEl.appendChild(empty);
+    return;
+  }
+  for (const d of autoUI.drafts) {
+    const row = document.createElement('div');
+    row.className = 'auto-draft';
+    const body = (d.data && d.data.body) || '';
+    row.innerHTML = `
+      <div class="auto-draft-head">
+        <span class="auto-draft-kind">${escapeHtml(d.kind)}</span>
+        <span class="auto-draft-target">${escapeHtml(d.repo)} · ${escapeHtml(d.targetId)}</span>
+      </div>
+      <textarea class="auto-draft-body" rows="4">${escapeHtml(body)}</textarea>
+      <div class="auto-draft-actions">
+        <button class="auto-btn primary" data-action="send">Send</button>
+        <button class="auto-btn" data-action="save">Save edits</button>
+        <button class="auto-btn danger" data-action="delete">Delete</button>
+      </div>
+    `;
+    const ta = row.querySelector('textarea');
+    row.querySelector('[data-action="send"]').addEventListener('click', async () => {
+      const res = await window.auto.sendDraft(d.id);
+      if (res && res.ok) {
+        refreshAutoPanel();
+      } else {
+        alert(`Send failed: ${res && res.error || 'unknown'}`);
+      }
+    });
+    row.querySelector('[data-action="save"]').addEventListener('click', async () => {
+      const next = { ...(d.data || {}), body: ta.value };
+      await window.auto.saveDraft(d.kind, d.repo, d.targetId, next);
+      refreshAutoPanel();
+    });
+    row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+      await window.auto.deleteDraft(d.id);
+      refreshAutoPanel();
+    });
+    autoDraftsListEl.appendChild(row);
+  }
+}
+
+// ----- Workflows ----------------------------------------------------------
+
+async function startIssueWorkflow(issue) {
+  // Capture the currently-active project BEFORE we create the new conv (because
+  // creating it switches `currentConversationId` to the empty new conv).
+  const sourceProjectPath = effectiveProjectPath(getCurrentConversation());
+  if (!sourceProjectPath) {
+    alert('Open a project (the local clone of this repo) in any chat before starting auto-issue work.');
+    return;
+  }
+
+  const conv = createConversation(`#${issue.number} ${issue.title}`);
+  const branch = `${autoUI.login || 'me'}/${issue.number}-${slugify(issue.title || 'issue')}`;
+  conv.projectPath = sourceProjectPath;
+
+  try {
+    const res = await window.worktree.add(sourceProjectPath, conv.id, branch);
+    if (res && res.worktreePath) {
+      conv.worktreePath = res.worktreePath;
+      conv.worktreeBranch = branch;
+    }
+  } catch (e) {
+    console.warn('worktree create failed:', e);
+  }
+
+  // Tag the conv so handleStreamEnd knows to open a draft PR when this agent run finishes.
+  conv.autoIssue = {
+    repo: issue.repo,
+    number: issue.number,
+    title: issue.title,
+    body: issue.body || '',
+    url: issue.url || '',
+    branch,
+    prCreated: false,
+  };
+  saveState();
+  switchConversation(conv.id);
+
+  // Prime the chat with a prompt that asks the agent to commit + push.
+  // Phase 2 finisher: when this stream ends successfully, the renderer auto-
+  // opens a draft PR and adds it to the CI watch list (Phase 3).
+  const prompt = [
+    `You're picking up GitHub issue #${issue.number} "${issue.title}" in ${issue.repo}.`,
+    `Issue body:`,
+    issue.body || '(no body)',
+    ``,
+    `Please:`,
+    `1. Explore the repo to understand the relevant code.`,
+    `2. Implement the change. Iterate until you're confident it's correct.`,
+    `3. Run the project's tests / typecheck / lint locally and make them pass.`,
+    `4. Commit your changes with a message like "Closes #${issue.number}: <short description>".`,
+    `5. Push the branch with: git push -u origin ${branch}`,
+    ``,
+    `When you've pushed, you're done — I'll automatically open a draft PR and watch CI.`,
+  ].join('\n');
+  inputEl.value = prompt;
+  autoResize();
+  // Don't auto-send — let the user kick it off so they can edit if needed.
+}
+
+function slugify(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().split(/\s+/).slice(0, 6).join('-');
+}
+
+async function draftReplyForThread(thread) {
+  const key = `${thread.repo}:${thread.kind}:${thread.kind === 'review' ? thread.rootId : thread.prNumber}`;
+  if (autoUI.drafting.has(key)) return;
+  autoUI.drafting.add(key);
+  try {
+    const targetId = thread.kind === 'review' ? thread.rootId : thread.prNumber;
+    const kind = thread.kind === 'review' ? 'review-reply' : 'comment';
+    // Show a placeholder draft so the user sees something happening
+    await window.auto.saveDraft(kind, thread.repo, targetId, {
+      body: '(drafting…)',
+      prNumber: thread.prNumber,
+      inReplyTo: thread.kind === 'review' ? thread.rootId : null,
+    });
+    await refreshAutoPanel();
+    // Spin a one-shot Claude call in a background conversation. Reuse the
+    // existing send-prompt machinery: create a hidden conversation, prompt it,
+    // collect the result, save as draft body.
+    const draftBody = await runOneShotClaude(buildReplyPrompt(thread));
+    await window.auto.saveDraft(kind, thread.repo, targetId, {
+      body: draftBody,
+      prNumber: thread.prNumber,
+      inReplyTo: thread.kind === 'review' ? thread.rootId : null,
+    });
+  } finally {
+    autoUI.drafting.delete(key);
+    refreshAutoPanel();
+  }
+}
+
+async function draftReviewForPR(pr) {
+  const key = `${pr.repo}:review:${pr.number}`;
+  if (autoUI.drafting.has(key)) return;
+  autoUI.drafting.add(key);
+  try {
+    await window.auto.saveDraft('review', pr.repo, pr.number, { body: '(drafting…)', event: 'COMMENT' });
+    await refreshAutoPanel();
+    const detail = await window.auto.prDetail(pr.repo, pr.number);
+    const files = await window.auto.prFiles(pr.repo, pr.number);
+    const draftBody = await runOneShotClaude(buildReviewPrompt(pr, detail, files));
+    await window.auto.saveDraft('review', pr.repo, pr.number, { body: draftBody, event: 'COMMENT' });
+  } finally {
+    autoUI.drafting.delete(key);
+    refreshAutoPanel();
+  }
+}
+
+function buildReplyPrompt(thread) {
+  const recent = (thread.comments || []).slice(-6).map(c => {
+    const u = (c.user && c.user.login) || (c.author && c.author.login) || '?';
+    return `@${u}: ${(c.body || '').slice(0, 800)}`;
+  }).join('\n---\n');
+  return [
+    `Draft a reply to the latest message in this PR thread, written as me (first person, no AI attribution, no signoff).`,
+    `Thread context (oldest → newest):`,
+    recent,
+    ``,
+    `Reply ONLY with the body of the comment, nothing else.`,
+  ].join('\n');
+}
+
+function buildReviewPrompt(pr, detail, files) {
+  const filesSummary = (files && files.files || []).slice(0, 25).map(f =>
+    `${f.filename} (+${f.additions} -${f.deletions})`
+  ).join('\n');
+  const body = (detail && detail.pr && detail.pr.body) || '';
+  return [
+    `Draft a code review for PR #${pr.number} "${pr.title}" in ${pr.repo}, written as me.`,
+    `PR body:`,
+    body.slice(0, 4000),
+    ``,
+    `Files touched:`,
+    filesSummary,
+    ``,
+    `Reply ONLY with the body of the review comment. Be specific and constructive. No AI attribution, no signoff.`,
+  ].join('\n');
+}
+
+// Run a single-shot Claude prompt without polluting the visible chat list.
+// We reuse the existing send-prompt + stream-end pipeline, scoped to a
+// throwaway conv id that the renderer never displays.
+function runOneShotClaude(prompt) {
+  return new Promise((resolve) => {
+    const convId = `auto-oneshot-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+    let buffered = '';
+    const onDelta = (data) => {
+      if (data.convId !== convId) return;
+      buffered += data.text || '';
+    };
+    const onEnd = (data) => {
+      if (data.convId !== convId) return;
+      cleanup();
+      resolve((data.result || buffered || '').trim());
+    };
+    const onError = (data) => {
+      if (data.convId !== convId) return;
+      cleanup();
+      resolve(buffered.trim() || '(draft failed — please type a reply)');
+    };
+    function cleanup() {
+      // The IPC API doesn't have per-id off, so we use a guard inside the listeners.
+      cleanedUp = true;
+    }
+    let cleanedUp = false;
+    window.claude.onStreamDelta((data) => { if (!cleanedUp) onDelta(data); });
+    window.claude.onStreamEnd((data) => { if (!cleanedUp) onEnd(data); });
+    window.claude.onStreamError((data) => { if (!cleanedUp) onError(data); });
+
+    const sessionId = generateUUID();
+    window.claude.sendPrompt(
+      convId, prompt, sessionId, true,
+      true, // yolo — we don't want permission prompts for one-shot drafting
+      null, // projectPath (none — pure text generation)
+      (autoUI.config && autoUI.config.draftModel) || null,
+      [],
+      (autoUI.config && autoUI.config.draftEffort) || null,
+    );
+    // Safety timeout — never hang the UI
+    setTimeout(() => { if (!cleanedUp) { cleanup(); resolve('(timed out drafting)'); } }, 120_000);
+  });
+}
+
+// ----- Wire-up ------------------------------------------------------------
+
+function wireAutoPanelEvents() {
+  if (!autoEnabledEl) return;
+  autoEnabledEl.addEventListener('change', async () => {
+    const next = { ...(autoUI.config || {}), enabled: autoEnabledEl.checked };
+    await window.auto.setConfig(next);
+    autoUI.config = next;
+    if (autoEnabledEl.checked) await window.auto.pollNow();
+    refreshAutoPanel();
+  });
+  if (autoStreamTogglesEl) {
+    autoStreamTogglesEl.addEventListener('change', async (e) => {
+      const target = e.target;
+      if (!target || !target.dataset || !target.dataset.stream) return;
+      const next = {
+        ...(autoUI.config || {}),
+        streams: {
+          ...((autoUI.config && autoUI.config.streams) || {}),
+          [target.dataset.stream]: target.checked,
+        },
+      };
+      await window.auto.setConfig(next);
+      autoUI.config = next;
+      refreshAutoPanel();
+    });
+  }
+  if (autoPollNowBtn) {
+    autoPollNowBtn.addEventListener('click', async () => {
+      autoPollNowBtn.classList.add('spinning');
+      try {
+        await window.auto.pollNow();
+        await refreshAutoPanel();
+      } finally {
+        autoPollNowBtn.classList.remove('spinning');
+      }
+    });
+  }
+  if (autoSettingsToggleBtn && autoSettingsEl) {
+    autoSettingsToggleBtn.addEventListener('click', () => {
+      autoSettingsEl.classList.toggle('hidden');
+      autoSettingsToggleBtn.classList.toggle('open', !autoSettingsEl.classList.contains('hidden'));
+    });
+  }
+  // Settings → config changes; use change events so we don't fire-on-every-keystroke
+  async function pushSettingDelta(delta) {
+    const next = { ...(autoUI.config || {}), ...delta };
+    await window.auto.setConfig(next);
+    autoUI.config = next;
+    renderAutoPanel();
+  }
+  if (autoModelSelectEl) {
+    autoModelSelectEl.addEventListener('change', () => {
+      pushSettingDelta({ draftModel: autoModelSelectEl.value || null });
+    });
+  }
+  if (autoEffortSelectEl) {
+    autoEffortSelectEl.addEventListener('change', () => {
+      pushSettingDelta({ draftEffort: autoEffortSelectEl.value || null });
+    });
+  }
+  if (autoIntervalSelectEl) {
+    autoIntervalSelectEl.addEventListener('change', () => {
+      const sec = Number(autoIntervalSelectEl.value) || 180;
+      pushSettingDelta({ intervalSec: sec });
+    });
+  }
+  if (window.auto && window.auto.onItemsUpdated) {
+    window.auto.onItemsUpdated(({ items, lastPollAt, login }) => {
+      autoUI.items = items;
+      autoUI.lastPollAt = lastPollAt;
+      if (login) autoUI.login = login;
+      renderAutoPanel();
+    });
+  }
+  if (window.auto && window.auto.onPRReady) {
+    window.auto.onPRReady(({ repo, number, reviewers }) => {
+      const url = `https://github.com/${repo}/pull/${number}`;
+      const reviewerStr = (reviewers && reviewers.length)
+        ? ` · requested ${reviewers.map(r => '@' + r).join(', ')}`
+        : '';
+      // Desktop notification (only if window not focused — same rule as chat-finished notifs).
+      if (typeof Notification !== 'undefined' &&
+          (typeof document.hasFocus !== 'function' || !document.hasFocus())) {
+        try {
+          const n = new Notification(`PR ready for review`, {
+            body: `${repo}#${number}${reviewerStr}`,
+            tag: `auto-pr-ready:${repo}#${number}`,
+            silent: false,
+          });
+          n.onclick = () => {
+            try { window.claude.focusWindow(); } catch (e) {}
+            if (window.shellAPI) window.shellAPI.openExternal(url);
+            n.close();
+          };
+        } catch (e) {}
+      }
+      // Always refresh the panel and surface a small inline banner for the
+      // currently-visible chat (handy when the user IS at their desk).
+      refreshAutoPanel();
+      const banner = document.createElement('div');
+      banner.className = 'compact-banner';
+      banner.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+        </svg>
+        <span>PR ready: <a href="#" data-pr-url>${escapeHtml(repo)}#${number}</a>${escapeHtml(reviewerStr)}</span>
+      `;
+      const link = banner.querySelector('[data-pr-url]');
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (window.shellAPI) window.shellAPI.openExternal(url);
+      });
+      messagesEl.appendChild(banner);
+      scrollToBottom();
+    });
+  }
+}
+
 // ===== Theme =====
 // Three-state preference: 'system' follows prefers-color-scheme; 'light' /
 // 'dark' pin the theme. The applier flips a class on <html> so CSS variables
@@ -5104,9 +6075,9 @@ function setThemePreference(pref) {
   applyTheme();
 }
 
-function init() {
-  // Load state
-  loadState();
+async function init() {
+  // Load state from DB (with one-time migration from localStorage on first run)
+  await loadState();
   applyTheme();
   if (systemThemeMedia && typeof systemThemeMedia.addEventListener === 'function') {
     systemThemeMedia.addEventListener('change', () => {
@@ -5123,6 +6094,7 @@ function init() {
   renderProjectPill();
   refreshBranch();
   renderModelSelector();
+  renderEffortSelector();
   applyPanelWidths();
   applyRightPanelVisibility();
   renderWsTabs();
@@ -5238,18 +6210,31 @@ function init() {
   inputEl.addEventListener('input', () => {
     autoResize();
     detectFilePickerTrigger();
+    detectSlashTrigger();
   });
-  inputEl.addEventListener('click', detectFilePickerTrigger);
+  inputEl.addEventListener('click', () => {
+    detectFilePickerTrigger();
+    detectSlashTrigger();
+  });
   inputEl.addEventListener('keyup', (e) => {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') {
       detectFilePickerTrigger();
+      detectSlashTrigger();
     }
   });
   inputEl.addEventListener('blur', () => {
     // Delay so mousedown on a picker item can fire first
-    setTimeout(() => closeFilePicker(), 120);
+    setTimeout(() => { closeFilePicker(); closeSlashPopover(); }, 120);
   });
   inputEl.addEventListener('keydown', (e) => {
+    if (slashPicker.open) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveSlashSelection(1); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); moveSlashSelection(-1); return; }
+      if (e.key === 'Tab') {
+        if (acceptSlashSelection()) { e.preventDefault(); return; }
+      }
+      if (e.key === 'Escape') { e.preventDefault(); closeSlashPopover(); return; }
+    }
     if (filePicker.open) {
       if (e.key === 'ArrowDown') { e.preventDefault(); moveFilePickerSelection(1); return; }
       if (e.key === 'ArrowUp')   { e.preventDefault(); moveFilePickerSelection(-1); return; }
@@ -5260,6 +6245,8 @@ function init() {
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      // Close popovers cleanly so the next time slash auto-opens correctly
+      closeSlashPopover();
       sendMessage(inputEl.value);
     }
   });
@@ -5319,6 +6306,22 @@ function init() {
       closeModelMenu();
     }
   });
+
+  // Effort selector
+  if (effortSelector) {
+    effortSelector.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (effortMenu.classList.contains('hidden')) openEffortMenu();
+      else closeEffortMenu();
+    });
+    document.addEventListener('click', (e) => {
+      if (!effortMenu.classList.contains('hidden') &&
+          !effortMenu.contains(e.target) &&
+          !effortSelector.contains(e.target)) {
+        closeEffortMenu();
+      }
+    });
+  }
 
   // Project pill
   projectPill.addEventListener('click', async () => {
@@ -5514,6 +6517,10 @@ function init() {
       openSpotlightContentSearch();
     }
   });
+
+  // Auto-mode panel
+  wireAutoPanelEvents();
+  refreshAutoPanel();
 
   // Initial status
   setStatus('ready', 'Ready');

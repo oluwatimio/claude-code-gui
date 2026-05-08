@@ -12,6 +12,10 @@ const {
   shouldSurfaceStderr,
   processStreamEvent: processStreamEventPure,
 } = require('./lib/claude-cli');
+const { listSlashCommands } = require('./lib/slash-commands');
+const stateStore = require('./lib/state-store');
+const autoMode = require('./lib/auto-mode');
+const autoDrafts = require('./lib/auto-drafts-store');
 
 const terminals = new Map(); // sessionId -> { pty, webContents }
 
@@ -237,6 +241,7 @@ app.whenReady().then(async () => {
   await startPermissionServer();
   writeMcpConfig();
   createWindow();
+  initAutoMode();
 });
 
 // ===== Context memory (SQLite) =====
@@ -245,6 +250,9 @@ function openContextDb() {
   fs.mkdirSync(userData, { recursive: true });
   const dbPath = path.join(userData, 'context.db');
   contextDb = new DatabaseSync(dbPath);
+  // App-state tables (conversations + settings) live in the same DB as memories
+  // — one file is easier to back up and there's no cross-store coordination.
+  stateStore.ensureSchema(contextDb);
   contextDb.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id         TEXT PRIMARY KEY,
@@ -1164,7 +1172,7 @@ ipcMain.handle('terminal:exists', async (_, { termId }) => terminals.has(termId)
 
 // ===== Claude CLI Integration =====
 ipcMain.on('claude:send-prompt', (event, data) => {
-  const { convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs } = data;
+  const { convId, prompt, sessionId, isFirst, yolo, projectPath, model, extraDirs, effort } = data;
   if (!convId) return;
 
   const existing = claudeProcesses.get(convId);
@@ -1175,7 +1183,7 @@ ipcMain.on('claude:send-prompt', (event, data) => {
 
   const claudeBin = findClaudeBinary();
   const args = buildClaudeArgs(
-    { sessionId, isFirst, yolo, mcpConfigPath, model, extraDirs },
+    { sessionId, isFirst, yolo, mcpConfigPath, model, extraDirs, effort },
     (p) => fs.existsSync(p)
   );
 
@@ -1245,6 +1253,677 @@ function processStreamEvent(event, convId, obj) {
   for (const { channel, payload } of processStreamEventPure(obj)) {
     event.sender.send(channel, { convId, ...payload });
   }
+}
+
+// ===== App state (conversations + settings) =====
+ipcMain.handle('state:load', async () => {
+  try { return stateStore.loadAll(contextDb); }
+  catch (e) { return { conversations: [], settings: {} }; }
+});
+
+ipcMain.handle('state:save', async (_, payload) => {
+  try { stateStore.saveAll(contextDb, payload || {}); return { ok: true }; }
+  catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
+
+ipcMain.handle('state:save-conversation', async (_, payload) => {
+  try {
+    if (!payload || !payload.conversation) return { ok: false, error: 'no conversation' };
+    stateStore.upsertConversation(contextDb, payload.conversation, payload.position);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
+
+ipcMain.handle('state:delete-conversation', async (_, payload) => {
+  try {
+    stateStore.deleteConversation(contextDb, payload && payload.id);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
+
+ipcMain.handle('state:set-setting', async (_, payload) => {
+  try {
+    stateStore.setSetting(contextDb, payload && payload.key, payload && payload.value);
+    return { ok: true };
+  } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+});
+
+ipcMain.handle('commands:list', async (_, payload) => {
+  const projectPath = (payload && payload.projectPath) || null;
+  try {
+    return listSlashCommands({ projectPath });
+  } catch (e) {
+    return [];
+  }
+});
+
+// ===== Auto-mode =====
+//
+// Poller + IPC for "auto" features: pick up issues assigned to me, draft
+// replies to PR comments, draft reviews on PRs requesting me, watch CI on
+// auto-opened PRs. Posting to GitHub always goes through a draft → click flow;
+// the loop never auto-posts on the user's behalf.
+
+const AUTO_DEFAULT_CONFIG = {
+  enabled: false,
+  intervalSec: 180,            // 3-minute poll cadence
+  streams: {
+    issues: true,
+    comments: true,
+    reviews: true,
+    ciWatch: true,
+  },
+};
+
+const autoState = {
+  config: AUTO_DEFAULT_CONFIG,
+  login: null,
+  pollTimer: null,
+  inflight: false,
+  // last successful poll snapshots, for the renderer to read
+  lastPollAt: 0,
+  items: { issues: [], commentThreads: [], reviewRequests: [] },
+};
+
+function getAutoConfig() {
+  try {
+    const { settings } = stateStore.loadAll(contextDb);
+    if (settings && settings.autoMode && typeof settings.autoMode === 'object') {
+      // Merge with defaults so newly-added fields don't break existing configs.
+      return {
+        ...AUTO_DEFAULT_CONFIG,
+        ...settings.autoMode,
+        streams: { ...AUTO_DEFAULT_CONFIG.streams, ...(settings.autoMode.streams || {}) },
+      };
+    }
+  } catch (e) {}
+  return AUTO_DEFAULT_CONFIG;
+}
+
+function setAutoConfig(next) {
+  const merged = {
+    ...AUTO_DEFAULT_CONFIG,
+    ...next,
+    streams: { ...AUTO_DEFAULT_CONFIG.streams, ...(next.streams || {}) },
+  };
+  stateStore.setSetting(contextDb, 'autoMode', merged);
+  autoState.config = merged;
+  schedulePoll();
+}
+
+async function ghWhoami() {
+  if (autoState.login) return autoState.login;
+  const { code, stdout } = await runGh(['api', 'user', '--jq', '.login']);
+  if (code !== 0) return null;
+  const login = stdout.trim();
+  if (login) autoState.login = login;
+  return login || null;
+}
+
+async function ghListAssignedIssues(login) {
+  // Cross-repo search: open issues assigned to me, excluding PRs.
+  const args = [
+    'search', 'issues',
+    '--assignee', login,
+    '--state', 'open',
+    '--json', 'number,title,body,url,repository,labels,updatedAt,state,createdAt,author',
+    '--limit', '50',
+  ];
+  const { code, stdout } = await runGh(args);
+  if (code !== 0) return [];
+  const rows = parseJsonSafe(stdout) || [];
+  // gh search issues returns both issues and PRs unless --type is set; keep
+  // only true issues.
+  return rows
+    .filter(r => r && !r.isPullRequest && !r.pull_request)
+    .map(r => ({
+      number: r.number,
+      title: r.title,
+      body: r.body || '',
+      url: r.url,
+      repo: r.repository ? `${r.repository.nameWithOwner || ''}` : '',
+      labels: Array.isArray(r.labels) ? r.labels.map(l => l.name) : [],
+      updatedAt: r.updatedAt,
+      author: r.author,
+      state: (r.state || 'OPEN').toUpperCase(),
+    }));
+}
+
+async function ghListMyOpenPRs(login) {
+  const args = [
+    'search', 'prs',
+    '--author', login,
+    '--state', 'open',
+    '--json', 'number,title,body,url,repository,headRefName,baseRefName,author,updatedAt,isDraft',
+    '--limit', '50',
+  ];
+  const { code, stdout } = await runGh(args);
+  if (code !== 0) return [];
+  return (parseJsonSafe(stdout) || []).map(r => ({
+    number: r.number,
+    title: r.title,
+    body: r.body || '',
+    url: r.url,
+    repo: r.repository ? r.repository.nameWithOwner : '',
+    headRefName: r.headRefName,
+    baseRefName: r.baseRefName,
+    author: r.author,
+    updatedAt: r.updatedAt,
+    isDraft: !!r.isDraft,
+  }));
+}
+
+async function ghListReviewRequests(login) {
+  const args = [
+    'search', 'prs',
+    '--review-requested', login,
+    '--state', 'open',
+    '--json', 'number,title,body,url,repository,headRefName,baseRefName,author,updatedAt,isDraft',
+    '--limit', '50',
+  ];
+  const { code, stdout } = await runGh(args);
+  if (code !== 0) return [];
+  return (parseJsonSafe(stdout) || []).map(r => ({
+    number: r.number,
+    title: r.title,
+    body: r.body || '',
+    url: r.url,
+    repo: r.repository ? r.repository.nameWithOwner : '',
+    headRefName: r.headRefName,
+    baseRefName: r.baseRefName,
+    author: r.author,
+    updatedAt: r.updatedAt,
+    isDraft: !!r.isDraft,
+  }));
+}
+
+async function ghPRThreads(repo, number) {
+  // Returns { issueComments, reviewComments } for a PR.
+  const [ic, rc] = await Promise.all([
+    runGh(['api', `repos/${repo}/issues/${number}/comments`, '--paginate']),
+    runGh(['api', `repos/${repo}/pulls/${number}/comments`, '--paginate']),
+  ]);
+  return {
+    issueComments: parseJsonSafe(ic.stdout) || [],
+    reviewComments: parseJsonSafe(rc.stdout) || [],
+  };
+}
+
+async function ghPRReviews(repo, number) {
+  const r = await runGh(['api', `repos/${repo}/pulls/${number}/reviews`, '--paginate']);
+  return parseJsonSafe(r.stdout) || [];
+}
+
+async function ghPRChecks(repo, number) {
+  // Use cwd-less api call so this works regardless of which repo the user is in.
+  const { code, stdout } = await runGh([
+    'pr', 'checks', String(number),
+    '--repo', repo,
+    '--json', 'name,state,bucket',
+  ]);
+  if (code !== 0 && code !== 8) return null;
+  const rows = parseJsonSafe(stdout) || [];
+  const summary = { pass: 0, fail: 0, pending: 0, skipping: 0, cancel: 0, other: 0, total: rows.length };
+  for (const r of rows) {
+    const b = r.bucket || '';
+    if (summary[b] != null) summary[b]++;
+    else summary.other++;
+  }
+  return { checks: rows, summary };
+}
+
+async function ghMarkReadyForReview(repo, number) {
+  const { code, stderr } = await runGh(['pr', 'ready', String(number), '--repo', repo]);
+  return { ok: code === 0, error: code === 0 ? null : stderr };
+}
+
+async function ghPostIssueComment(repo, number, body) {
+  const { code, stderr, stdout } = await runGh(
+    ['api', '--method', 'POST', `repos/${repo}/issues/${number}/comments`, '-f', `body=${body}`]
+  );
+  return { ok: code === 0, error: code === 0 ? null : stderr, comment: parseJsonSafe(stdout) };
+}
+
+async function ghReplyToReviewComment(repo, number, inReplyTo, body) {
+  const { code, stderr, stdout } = await runGh([
+    'api', '--method', 'POST',
+    `repos/${repo}/pulls/${number}/comments/${inReplyTo}/replies`,
+    '-f', `body=${body}`,
+  ]);
+  return { ok: code === 0, error: code === 0 ? null : stderr, comment: parseJsonSafe(stdout) };
+}
+
+async function ghSubmitReview(repo, number, { event, body }) {
+  // event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'
+  const args = [
+    'api', '--method', 'POST', `repos/${repo}/pulls/${number}/reviews`,
+    '-f', `event=${event || 'COMMENT'}`,
+  ];
+  if (body) args.push('-f', `body=${body}`);
+  const { code, stderr, stdout } = await runGh(args);
+  return { ok: code === 0, error: code === 0 ? null : stderr, review: parseJsonSafe(stdout) };
+}
+
+async function ghAddReviewers(repo, number, reviewers) {
+  if (!reviewers || !reviewers.length) return { ok: true };
+  // Distinguish team handles (org/team) vs user handles
+  const teams = reviewers.filter(r => r.includes('/')).map(r => r.split('/').pop());
+  const users = reviewers.filter(r => !r.includes('/'));
+  const args = ['api', '--method', 'POST', `repos/${repo}/pulls/${number}/requested_reviewers`];
+  if (users.length) for (const u of users) args.push('-f', `reviewers[]=${u}`);
+  if (teams.length) for (const t of teams) args.push('-f', `team_reviewers[]=${t}`);
+  const { code, stderr } = await runGh(args);
+  return { ok: code === 0, error: code === 0 ? null : stderr };
+}
+
+function schedulePoll() {
+  if (autoState.pollTimer) {
+    clearTimeout(autoState.pollTimer);
+    autoState.pollTimer = null;
+  }
+  if (!autoState.config.enabled) return;
+  const ms = Math.max(60_000, (autoState.config.intervalSec || 180) * 1000);
+  autoState.pollTimer = setTimeout(() => runPoll().finally(schedulePoll), ms);
+}
+
+async function runPoll() {
+  if (autoState.inflight) return;
+  autoState.inflight = true;
+  try {
+    const login = await ghWhoami();
+    if (!login) return;
+    const cfg = autoState.config;
+    const items = { issues: [], commentThreads: [], reviewRequests: [] };
+
+    if (cfg.streams.issues) {
+      const [issues, myPRs] = await Promise.all([
+        ghListAssignedIssues(login),
+        ghListMyOpenPRs(login),
+      ]);
+      items.issues = autoMode.selectActionableIssues({ issues, myPRs, login });
+    }
+
+    if (cfg.streams.comments) {
+      const myPRs = await ghListMyOpenPRs(login);
+      for (const pr of myPRs) {
+        const { issueComments, reviewComments } = await ghPRThreads(pr.repo, pr.number);
+        const threads = autoMode.selectUnansweredCommentThreads({ issueComments, reviewComments, login });
+        for (const t of threads) {
+          items.commentThreads.push({
+            ...t,
+            repo: pr.repo,
+            prNumber: pr.number,
+            prTitle: pr.title,
+            prUrl: pr.url,
+          });
+        }
+      }
+    }
+
+    if (cfg.streams.reviews) {
+      const requested = await ghListReviewRequests(login);
+      const reviewsByPRNum = {};
+      for (const pr of requested) {
+        reviewsByPRNum[pr.number] = await ghPRReviews(pr.repo, pr.number);
+      }
+      items.reviewRequests = autoMode.selectPRsNeedingReview({
+        requestedPRs: requested,
+        reviewsByPRNum,
+        login,
+      });
+    }
+
+    // Filter dismissed
+    items.issues = items.issues.filter(i => !autoDrafts.isDismissed(contextDb, 'issue', i.repo, i.number));
+    items.commentThreads = items.commentThreads.filter(t => !autoDrafts.isDismissed(contextDb, t.kind === 'review' ? 'review-reply' : 'comment', t.repo, t.kind === 'review' ? t.rootId : t.prNumber));
+    items.reviewRequests = items.reviewRequests.filter(p => !autoDrafts.isDismissed(contextDb, 'review', p.repo, p.number));
+
+    autoState.items = items;
+    autoState.lastPollAt = Date.now();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('auto:items-updated', {
+        items, lastPollAt: autoState.lastPollAt, login,
+      });
+    }
+  } catch (e) {
+    console.warn('auto-mode poll failed:', e && e.message);
+  } finally {
+    autoState.inflight = false;
+  }
+}
+
+// ===== Auto-mode IPC =====
+
+ipcMain.handle('auto:status', async () => {
+  return {
+    config: autoState.config,
+    login: autoState.login,
+    lastPollAt: autoState.lastPollAt,
+    items: autoState.items,
+    drafts: autoDrafts.listDrafts(contextDb),
+  };
+});
+
+ipcMain.handle('auto:set-config', async (_, payload) => {
+  setAutoConfig(payload || {});
+  return { ok: true, config: autoState.config };
+});
+
+ipcMain.handle('auto:poll-now', async () => {
+  await runPoll();
+  return {
+    items: autoState.items,
+    lastPollAt: autoState.lastPollAt,
+    drafts: autoDrafts.listDrafts(contextDb),
+  };
+});
+
+ipcMain.handle('auto:dismiss', async (_, payload) => {
+  const { kind, repo, targetId } = payload || {};
+  if (!kind || !repo || targetId == null) return { ok: false, error: 'kind/repo/targetId required' };
+  autoDrafts.dismiss(contextDb, kind, repo, targetId);
+  return { ok: true };
+});
+
+// Save / list / delete a draft. The renderer drives draft creation by running
+// a Claude one-shot in the renderer process (it already owns the chat UI),
+// then sends the resulting body back here for storage.
+ipcMain.handle('auto:save-draft', async (_, payload) => {
+  const { kind, repo, targetId, data } = payload || {};
+  if (!kind || !repo || targetId == null) return { ok: false, error: 'kind/repo/targetId required' };
+  const id = autoDrafts.upsertDraft(contextDb, { kind, repo, targetId, data });
+  return { ok: true, id };
+});
+
+ipcMain.handle('auto:list-drafts', async () => {
+  return { drafts: autoDrafts.listDrafts(contextDb) };
+});
+
+ipcMain.handle('auto:delete-draft', async (_, payload) => {
+  if (!payload || !payload.id) return { ok: false, error: 'id required' };
+  autoDrafts.deleteDraft(contextDb, payload.id);
+  return { ok: true };
+});
+
+ipcMain.handle('auto:send-draft', async (_, payload) => {
+  if (!payload || !payload.id) return { ok: false, error: 'id required' };
+  const draft = autoDrafts.getDraft(contextDb, payload.id);
+  if (!draft) return { ok: false, error: 'draft not found' };
+  const body = (draft.data && draft.data.body) || '';
+  if (!body.trim()) return { ok: false, error: 'empty body' };
+
+  let result;
+  if (draft.kind === 'comment') {
+    result = await ghPostIssueComment(draft.repo, draft.targetId, body);
+  } else if (draft.kind === 'review-reply') {
+    const inReplyTo = (draft.data && draft.data.inReplyTo) || null;
+    const prNumber = (draft.data && draft.data.prNumber) || null;
+    if (!inReplyTo || !prNumber) return { ok: false, error: 'review-reply requires inReplyTo + prNumber' };
+    result = await ghReplyToReviewComment(draft.repo, prNumber, inReplyTo, body);
+  } else if (draft.kind === 'review') {
+    const event = (draft.data && draft.data.event) || 'COMMENT';
+    result = await ghSubmitReview(draft.repo, draft.targetId, { event, body });
+  } else {
+    return { ok: false, error: `unknown draft kind: ${draft.kind}` };
+  }
+  if (result.ok) {
+    autoDrafts.deleteDraft(contextDb, draft.id);
+  }
+  return result;
+});
+
+// Open a draft PR for an issue. Caller already created the worktree and pushed
+// the branch; we just open the PR with --draft. Title/body come from the LLM.
+ipcMain.handle('auto:create-draft-pr', async (_, payload) => {
+  const { repo, base, head, title, body } = payload || {};
+  if (!repo || !title || !head) return { ok: false, error: 'repo/title/head required' };
+  const args = [
+    'pr', 'create',
+    '--repo', repo,
+    '--draft',
+    '--title', title,
+    '--body', body || '',
+    '--head', head,
+  ];
+  if (base) args.push('--base', base);
+  const { code, stderr, stdout } = await runGh(args);
+  if (code !== 0) return { ok: false, error: stderr.trim() || 'gh pr create failed' };
+  return { ok: true, url: stdout.trim() };
+});
+
+ipcMain.handle('auto:add-reviewers', async (_, payload) => {
+  const { repo, number, reviewers } = payload || {};
+  if (!repo || !number || !Array.isArray(reviewers)) return { ok: false, error: 'repo/number/reviewers required' };
+  return ghAddReviewers(repo, number, reviewers);
+});
+
+ipcMain.handle('auto:pr-checks', async (_, payload) => {
+  const { repo, number } = payload || {};
+  if (!repo || !number) return { ok: false, error: 'repo/number required' };
+  const out = await ghPRChecks(repo, number);
+  if (!out) return { ok: false, error: 'failed to read checks' };
+  return { ok: true, ...out };
+});
+
+ipcMain.handle('auto:mark-ready', async (_, payload) => {
+  const { repo, number } = payload || {};
+  if (!repo || !number) return { ok: false, error: 'repo/number required' };
+  return ghMarkReadyForReview(repo, number);
+});
+
+ipcMain.handle('auto:pr-files', async (_, payload) => {
+  const { repo, number } = payload || {};
+  if (!repo || !number) return { ok: false, error: 'repo/number required' };
+  const { code, stdout } = await runGh(['api', `repos/${repo}/pulls/${number}/files`, '--paginate']);
+  if (code !== 0) return { ok: false, error: 'failed' };
+  const files = (parseJsonSafe(stdout) || []).map(f => ({
+    filename: f.filename, status: f.status, additions: f.additions, deletions: f.deletions, patch: f.patch || '',
+  }));
+  return { ok: true, files };
+});
+
+ipcMain.handle('auto:pr-detail', async (_, payload) => {
+  const { repo, number } = payload || {};
+  if (!repo || !number) return { ok: false, error: 'repo/number required' };
+  const [view, threads, reviews] = await Promise.all([
+    runGh(['api', `repos/${repo}/pulls/${number}`]),
+    ghPRThreads(repo, number),
+    ghPRReviews(repo, number),
+  ]);
+  if (view.code !== 0) return { ok: false, error: 'failed' };
+  return {
+    ok: true,
+    pr: parseJsonSafe(view.stdout),
+    issueComments: threads.issueComments,
+    reviewComments: threads.reviewComments,
+    reviews,
+  };
+});
+
+ipcMain.handle('auto:pick-reviewers', async (_, payload) => {
+  const { repo, number, projectPath } = payload || {};
+  if (!repo || !number) return { ok: false, error: 'repo/number required' };
+  const filesRes = await runGh(['api', `repos/${repo}/pulls/${number}/files`, '--paginate']);
+  if (filesRes.code !== 0) return { ok: false, error: 'failed listing files' };
+  const files = (parseJsonSafe(filesRes.stdout) || []).map(f => f.filename);
+  // CODEOWNERS — try local checkout first, fall back to API.
+  let codeowners = '';
+  if (projectPath) {
+    for (const sub of ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS']) {
+      try {
+        codeowners = fs.readFileSync(path.join(projectPath, sub), 'utf8');
+        if (codeowners) break;
+      } catch (e) {}
+    }
+  }
+  if (!codeowners) {
+    const r = await runGh(['api', `repos/${repo}/contents/.github/CODEOWNERS`, '--jq', '.content']);
+    if (r.code === 0 && r.stdout.trim()) {
+      try { codeowners = Buffer.from(r.stdout.trim(), 'base64').toString('utf8'); } catch (e) {}
+    }
+  }
+  // Recent authors per file via git log, when we have a local checkout.
+  const recentAuthorsByFile = {};
+  if (projectPath) {
+    for (const f of files.slice(0, 15)) { // cap to avoid runaway
+      try {
+        const { execSync } = require('child_process');
+        const out = execSync(`git log --pretty=format:%an -n 5 -- "${f}"`, {
+          cwd: projectPath, encoding: 'utf8', timeout: 4000,
+        }).split('\n').map(s => s.trim()).filter(Boolean);
+        recentAuthorsByFile[f] = Array.from(new Set(out));
+      } catch (e) {}
+    }
+  }
+  // PR author
+  const prRes = await runGh(['api', `repos/${repo}/pulls/${number}`, '--jq', '.user.login']);
+  const prAuthor = prRes.code === 0 ? prRes.stdout.trim() : null;
+  const login = await ghWhoami();
+  const reviewers = autoMode.selectReviewers({
+    touchedFiles: files,
+    codeowners,
+    recentAuthorsByFile,
+    prAuthor,
+    login,
+    n: 2,
+  });
+  return { ok: true, reviewers };
+});
+
+// ----- CI watcher (Phase 3) ----------------------------------------------
+//
+// For each PR the loop opened (stored in auto_watched_prs with status=watching)
+// poll `gh pr checks`. When green → pick reviewers, request them, and flip
+// the PR ready-for-review. The list survives restarts.
+
+const CI_POLL_INTERVAL_MS = 90_000;
+let ciWatchTimer = null;
+
+function broadcastWatched() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('auto:watched-updated', {
+    watched: autoDrafts.listWatchedPRs(contextDb),
+  });
+}
+
+async function processWatchedPR(entry) {
+  const checks = await ghPRChecks(entry.repo, entry.number);
+  if (!checks) return;
+  const summary = checks.summary || { pass: 0, fail: 0, pending: 0, total: 0 };
+
+  if (autoMode.shouldFlipPRReadyForReview(summary)) {
+    // 1. Pick reviewers (best-effort; OK if it returns []).
+    let reviewers = [];
+    try {
+      const filesRes = await runGh(['api', `repos/${entry.repo}/pulls/${entry.number}/files`, '--paginate']);
+      const files = filesRes.code === 0
+        ? (parseJsonSafe(filesRes.stdout) || []).map(f => f.filename)
+        : [];
+
+      let codeowners = '';
+      if (entry.projectPath) {
+        for (const sub of ['CODEOWNERS', '.github/CODEOWNERS', 'docs/CODEOWNERS']) {
+          try { codeowners = fs.readFileSync(path.join(entry.projectPath, sub), 'utf8'); if (codeowners) break; } catch (e) {}
+        }
+      }
+      const recentAuthorsByFile = {};
+      if (entry.projectPath) {
+        const { execSync } = require('child_process');
+        for (const f of files.slice(0, 15)) {
+          try {
+            const out = execSync(`git log --pretty=format:%an -n 5 -- "${f}"`, {
+              cwd: entry.projectPath, encoding: 'utf8', timeout: 4000,
+            }).split('\n').map(s => s.trim()).filter(Boolean);
+            recentAuthorsByFile[f] = Array.from(new Set(out));
+          } catch (e) {}
+        }
+      }
+      const prRes = await runGh(['api', `repos/${entry.repo}/pulls/${entry.number}`, '--jq', '.user.login']);
+      const prAuthor = prRes.code === 0 ? prRes.stdout.trim() : null;
+      const login = await ghWhoami();
+      reviewers = autoMode.selectReviewers({
+        touchedFiles: files,
+        codeowners,
+        recentAuthorsByFile,
+        prAuthor,
+        login,
+        n: 2,
+      });
+    } catch (e) {
+      console.warn('reviewer selection failed:', e && e.message);
+    }
+
+    if (reviewers.length) {
+      await ghAddReviewers(entry.repo, entry.number, reviewers);
+    }
+    const ready = await ghMarkReadyForReview(entry.repo, entry.number);
+    if (ready.ok) {
+      autoDrafts.setWatchedPRStatus(contextDb, entry.repo, entry.number, 'ready', Date.now());
+      // Notify the renderer so it can show a celebratory line / desktop notif.
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('auto:pr-ready', {
+          repo: entry.repo, number: entry.number, reviewers,
+        });
+      }
+    } else {
+      console.warn(`gh pr ready failed for ${entry.repo}#${entry.number}:`, ready.error);
+      autoDrafts.setWatchedPRStatus(contextDb, entry.repo, entry.number, 'watching', Date.now());
+    }
+  } else if ((summary.fail || 0) > 0) {
+    autoDrafts.setWatchedPRStatus(contextDb, entry.repo, entry.number, 'failed', Date.now());
+  } else {
+    autoDrafts.setWatchedPRStatus(contextDb, entry.repo, entry.number, 'watching', Date.now());
+  }
+}
+
+async function runCIWatcherTick() {
+  // Only watch when ciWatch stream is enabled.
+  if (!autoState.config.enabled || !autoState.config.streams.ciWatch) return;
+  const watching = autoDrafts.listWatchedPRs(contextDb, { status: 'watching' });
+  if (!watching.length) return;
+  for (const entry of watching) {
+    try { await processWatchedPR(entry); }
+    catch (e) { console.warn('processWatchedPR failed:', e && e.message); }
+  }
+  broadcastWatched();
+}
+
+function scheduleCIWatcher() {
+  if (ciWatchTimer) { clearInterval(ciWatchTimer); ciWatchTimer = null; }
+  ciWatchTimer = setInterval(() => {
+    runCIWatcherTick().catch(() => {});
+  }, CI_POLL_INTERVAL_MS);
+}
+
+ipcMain.handle('auto:watch-pr', async (_, payload) => {
+  const { repo, number, branch, issueNumber, projectPath, title } = payload || {};
+  if (!repo || !number || !branch) return { ok: false, error: 'repo/number/branch required' };
+  autoDrafts.addWatchedPR(contextDb, {
+    repo, number, branch, issueNumber, projectPath,
+    data: { title: title || '' },
+  });
+  // Kick the watcher immediately so we don't wait 90s for the first tick.
+  runCIWatcherTick().catch(() => {});
+  return { ok: true };
+});
+
+ipcMain.handle('auto:list-watched', async () => {
+  return { watched: autoDrafts.listWatchedPRs(contextDb) };
+});
+
+ipcMain.handle('auto:unwatch-pr', async (_, payload) => {
+  const { repo, number } = payload || {};
+  if (!repo || !number) return { ok: false, error: 'repo/number required' };
+  autoDrafts.removeWatchedPR(contextDb, repo, number);
+  broadcastWatched();
+  return { ok: true };
+});
+
+// Initialise auto-mode on startup
+function initAutoMode() {
+  autoState.config = getAutoConfig();
+  schedulePoll();
+  scheduleCIWatcher();
 }
 
 ipcMain.on('window:focus', () => {

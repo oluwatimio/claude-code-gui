@@ -76,6 +76,10 @@
     <aside id="sidebar">
       <div class="sidebar-tabs">
         <button class="sidebar-tab active" data-tab="chats">Chats</button>
+        <button class="sidebar-tab" data-tab="auto">
+          Auto
+          <span id="auto-tab-badge" class="sidebar-tab-badge hidden">0</span>
+        </button>
         <button class="sidebar-tab" data-tab="memories">Memories</button>
       </div>
       <div id="chats-panel" class="sidebar-panel active">
@@ -94,6 +98,68 @@
           <input id="memory-search" type="text" placeholder="Search memories..." autocomplete="off">
         </div>
         <div id="memory-list"></div>
+      </div>
+
+      <div id="auto-panel" class="sidebar-panel">
+        <div class="auto-header">
+          <div class="auto-master-row">
+            <div class="auto-master-label">
+              <span class="auto-master-title">Auto mode</span>
+              <span id="auto-meta" class="auto-meta"></span>
+            </div>
+            <label class="auto-switch" title="Toggle auto mode">
+              <input id="auto-enabled" type="checkbox">
+              <span class="auto-switch-track"><span class="auto-switch-thumb"></span></span>
+            </label>
+          </div>
+          <div class="auto-controls-row">
+            <div id="auto-stream-toggles" class="auto-stream-toggles">
+              <label class="auto-chip"><input data-stream="issues" type="checkbox"><span>Issues</span></label>
+              <label class="auto-chip"><input data-stream="comments" type="checkbox"><span>Comments</span></label>
+              <label class="auto-chip"><input data-stream="reviews" type="checkbox"><span>Reviews</span></label>
+              <label class="auto-chip"><input data-stream="ciWatch" type="checkbox"><span>CI</span></label>
+            </div>
+            <button id="auto-settings-toggle" class="auto-icon-btn" type="button" title="Settings" aria-label="Settings">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+            <button id="auto-poll-now" class="auto-icon-btn" type="button" title="Poll now" aria-label="Poll now">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10"/>
+                <path d="M20.49 15A9 9 0 015.64 18.36L1 14"/>
+              </svg>
+            </button>
+          </div>
+          <div id="auto-settings" class="auto-settings hidden">
+            <label class="auto-setting-row">
+              <span>Model</span>
+              <select id="auto-model"></select>
+            </label>
+            <label class="auto-setting-row">
+              <span>Effort</span>
+              <select id="auto-effort"></select>
+            </label>
+            <label class="auto-setting-row">
+              <span>Poll every</span>
+              <select id="auto-interval">
+                <option value="60">1 minute</option>
+                <option value="180">3 minutes</option>
+                <option value="300">5 minutes</option>
+                <option value="600">10 minutes</option>
+                <option value="1800">30 minutes</option>
+                <option value="3600">1 hour</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div id="auto-queue" class="auto-queue"></div>
+        <div id="auto-drafts" class="auto-drafts">
+          <div class="auto-section-title">Drafts</div>
+          <div id="auto-drafts-list"></div>
+        </div>
       </div>
 
       <div class="sidebar-footer">
@@ -213,6 +279,7 @@
           </button>
         </div>
         <div id="file-picker" class="file-picker hidden"></div>
+        <div id="slash-popover" class="slash-popover hidden"></div>
         <div id="input-wrapper">
           <div id="attachments-list" class="hidden"></div>
           <textarea id="prompt-input" placeholder="Ask Claude anything..." rows="1" autofocus></textarea>
@@ -270,6 +337,15 @@
                 </svg>
               </button>
               <div id="model-menu" class="hidden"></div>
+            </div>
+            <div class="model-wrapper">
+              <button id="effort-selector" type="button" title="Reasoning effort">
+                <span id="effort-label">Effort</span>
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="6 9 12 15 18 9"/>
+                </svg>
+              </button>
+              <div id="effort-menu" class="hidden"></div>
             </div>
           </div>
         </div>
