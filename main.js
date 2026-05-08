@@ -1313,6 +1313,7 @@ const AUTO_DEFAULT_CONFIG = {
     reviews: true,
     ciWatch: true,
   },
+  includeTeamReviews: true,    // include PRs where my TEAM was requested as reviewer
 };
 
 const autoState = {
@@ -1445,6 +1446,31 @@ async function ghListReviewRequests(login) {
   }));
 }
 
+// Return only the PRs where `login` appears in `requested_reviewers` directly
+// (not via a team). One round-trip per PR; the queue is bounded so this is
+// fine for occasional polls.
+async function filterToDirectReviewRequests(prs, login) {
+  if (!prs.length) return prs;
+  const out = [];
+  await Promise.all(prs.map(async (pr) => {
+    try {
+      const r = await runGh([
+        'api', `repos/${pr.repo}/pulls/${pr.number}`,
+        '--jq', '[.requested_reviewers[].login]',
+      ]);
+      if (r.code !== 0) { out.push(pr); return; } // fail-open: keep the PR
+      const reviewers = parseJsonSafe(r.stdout) || [];
+      if (reviewers.includes(login)) out.push(pr);
+    } catch (e) {
+      out.push(pr); // fail-open
+    }
+  }));
+  // Preserve original ordering
+  const order = new Map(prs.map((p, i) => [autoMode.reviewKeyForPR(p), i]));
+  out.sort((a, b) => (order.get(autoMode.reviewKeyForPR(a)) || 0) - (order.get(autoMode.reviewKeyForPR(b)) || 0));
+  return out;
+}
+
 async function ghPRThreads(repo, number) {
   // Returns { issueComments, reviewComments } for a PR.
   const [ic, rc] = await Promise.all([
@@ -1569,14 +1595,20 @@ async function runPoll() {
     }
 
     if (cfg.streams.reviews) {
-      const requested = await ghListReviewRequests(login);
-      const reviewsByPRNum = {};
+      let requested = await ghListReviewRequests(login);
+      // Optionally drop PRs that were requested only via a team you're on.
+      // GitHub's `review-requested:<user>` qualifier returns BOTH direct and
+      // team-mediated requests; the user can opt out.
+      if (cfg.includeTeamReviews === false) {
+        requested = await filterToDirectReviewRequests(requested, login);
+      }
+      const reviewsByKey = {};
       for (const pr of requested) {
-        reviewsByPRNum[pr.number] = await ghPRReviews(pr.repo, pr.number);
+        reviewsByKey[autoMode.reviewKeyForPR(pr)] = await ghPRReviews(pr.repo, pr.number);
       }
       items.reviewRequests = autoMode.selectPRsNeedingReview({
         requestedPRs: requested,
-        reviewsByPRNum,
+        reviewsByKey,
         login,
       });
     }

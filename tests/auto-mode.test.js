@@ -159,14 +159,34 @@ test('groupReviewCommentsIntoThreads: handles missing parents defensively', () =
 
 test('selectPRsNeedingReview: drops PRs I already approved', () => {
   const out = selectPRsNeedingReview({
-    requestedPRs: [{ number: 1 }, { number: 2 }],
-    reviewsByPRNum: {
-      1: [{ user: { login: 'timi' }, state: 'APPROVED' }],
-      2: [{ user: { login: 'alice' }, state: 'APPROVED' }],
+    requestedPRs: [
+      { repo: 'a/b', number: 1 },
+      { repo: 'a/b', number: 2 },
+    ],
+    reviewsByKey: {
+      'a/b#1': [{ user: { login: 'timi' }, state: 'APPROVED' }],
+      'a/b#2': [{ user: { login: 'alice' }, state: 'APPROVED' }],
     },
     login: 'timi',
   });
   assert.deepEqual(out.map(p => p.number), [2]);
+});
+
+test('selectPRsNeedingReview: same PR number in different repos is not clobbered', () => {
+  // Regression: keying by pr.number alone made `c/d#1`'s reviews shadow `a/b#1`.
+  const out = selectPRsNeedingReview({
+    requestedPRs: [
+      { repo: 'a/b', number: 1 },
+      { repo: 'c/d', number: 1 },
+    ],
+    reviewsByKey: {
+      'a/b#1': [{ user: { login: 'timi' }, state: 'APPROVED' }],
+      'c/d#1': [], // no reviews from me yet — should still surface
+    },
+    login: 'timi',
+  });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].repo, 'c/d');
 });
 
 test('myReviewSatisfied: COMMENTED reviews don\'t count as "engaged"', () => {

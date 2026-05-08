@@ -37,6 +37,7 @@ const autoSettingsEl = document.getElementById('auto-settings');
 const autoModelSelectEl = document.getElementById('auto-model');
 const autoEffortSelectEl = document.getElementById('auto-effort');
 const autoIntervalSelectEl = document.getElementById('auto-interval');
+const autoIncludeTeamReviewsEl = document.getElementById('auto-include-team-reviews');
 
 async function refreshAutoPanel() {
   if (!window.auto) return;
@@ -102,6 +103,11 @@ function renderAutoSettings() {
     // Snap to the nearest preset; if no preset matches, the browser keeps the
     // raw value (so a programmatic config change still round-trips).
     autoIntervalSelectEl.value = String(sec);
+  }
+  if (autoIncludeTeamReviewsEl) {
+    // Default true (matches GitHub's `review-requested:<user>` semantics).
+    const incl = autoUI.config && autoUI.config.includeTeamReviews;
+    autoIncludeTeamReviewsEl.checked = incl !== false;
   }
 }
 
@@ -563,6 +569,14 @@ function wireAutoPanelEvents() {
     autoIntervalSelectEl.addEventListener('change', () => {
       const sec = Number(autoIntervalSelectEl.value) || 180;
       pushSettingDelta({ intervalSec: sec });
+    });
+  }
+  if (autoIncludeTeamReviewsEl) {
+    autoIncludeTeamReviewsEl.addEventListener('change', async () => {
+      await pushSettingDelta({ includeTeamReviews: autoIncludeTeamReviewsEl.checked });
+      // Re-poll so the queue updates immediately to reflect the new filter.
+      try { await window.auto.pollNow(); } catch (e) {}
+      refreshAutoPanel();
     });
   }
   if (window.auto && window.auto.onItemsUpdated) {

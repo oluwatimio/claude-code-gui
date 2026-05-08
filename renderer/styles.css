@@ -4777,6 +4777,43 @@ body.ws-resizing-col .side-resize {
   color: var(--text-primary, #e0e0e0);
 }
 
+/* Checkbox-style settings row (single boolean). Aligns the checkbox to the
+   right edge to match the dropdowns above. */
+.auto-setting-checkbox {
+  cursor: pointer;
+}
+.auto-setting-checkbox input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border-strong, rgba(255,255,255,0.2));
+  border-radius: 3px;
+  background: rgba(255,255,255,0.03);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.12s, border-color 0.12s;
+}
+.auto-setting-checkbox input[type="checkbox"]:hover {
+  border-color: var(--text-muted, #8a8a8a);
+}
+.auto-setting-checkbox input[type="checkbox"]:checked {
+  background: var(--accent, #00d26a);
+  border-color: var(--accent, #00d26a);
+}
+.auto-setting-checkbox input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 5px;
+  height: 9px;
+  border: solid #000;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
 /* Sections */
 .auto-queue,
 .auto-drafts {
