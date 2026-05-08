@@ -20,6 +20,9 @@ const autoUI = {
   login: null,
   lastPollAt: 0,
   drafting: new Set(), // dedup keys for in-flight drafting work
+  // Per-section collapsed state. Drafts default-collapsed since they're
+  // less actionable than the queue itself; queue sections default-open.
+  collapsedSections: { issues: false, comments: false, reviews: false, drafts: true },
 };
 
 const autoEnabledEl = document.getElementById('auto-enabled');
@@ -112,33 +115,65 @@ function updateAutoBadge() {
   autoTabBadgeEl.classList.toggle('hidden', total === 0);
 }
 
+// Build a collapsible section: header (chevron + title + count badge) and a
+// body that renders one item per row. The collapsed state is preserved in
+// `autoUI.collapsedSections[key]` so re-renders (poll updates, etc.) don't
+// force the section back open.
+function renderAutoSection({ key, title, items, renderItem, emptyText }) {
+  const wrap = document.createElement('div');
+  const collapsed = !!autoUI.collapsedSections[key];
+  wrap.className = 'auto-section' + (collapsed ? ' collapsed' : '');
+
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'auto-section-header';
+  header.innerHTML = `
+    <svg class="auto-section-chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="6 9 12 15 18 9"/>
+    </svg>
+    <span class="auto-section-title">${escapeHtml(title)}</span>
+    <span class="auto-section-count">${items.length}</span>
+  `;
+  header.addEventListener('click', () => {
+    autoUI.collapsedSections[key] = !autoUI.collapsedSections[key];
+    wrap.classList.toggle('collapsed');
+  });
+  wrap.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'auto-section-body';
+  if (items.length) {
+    for (const item of items) body.appendChild(renderItem(item));
+  } else if (emptyText) {
+    const empty = document.createElement('div');
+    empty.className = 'auto-empty';
+    empty.textContent = emptyText;
+    body.appendChild(empty);
+  }
+  wrap.appendChild(body);
+  return wrap;
+}
+
 function renderAutoQueue() {
   if (!autoQueueEl) return;
   autoQueueEl.innerHTML = '';
   const sections = [
-    { title: 'Issues assigned to you', items: autoUI.items.issues || [], render: renderIssueRow },
-    { title: 'Unanswered PR threads', items: autoUI.items.commentThreads || [], render: renderCommentRow },
-    { title: 'Review requested', items: autoUI.items.reviewRequests || [], render: renderReviewRow },
+    { key: 'issues',   title: 'Issues',   items: autoUI.items.issues || [],          renderItem: renderIssueRow,   emptyText: 'No issues assigned to you.' },
+    { key: 'comments', title: 'Comments', items: autoUI.items.commentThreads || [],  renderItem: renderCommentRow, emptyText: 'No unanswered threads.' },
+    { key: 'reviews',  title: 'Reviews',  items: autoUI.items.reviewRequests || [],  renderItem: renderReviewRow,  emptyText: 'No PRs awaiting your review.' },
   ];
-  let nonEmpty = 0;
-  for (const section of sections) {
-    if (!section.items.length) continue;
-    nonEmpty++;
-    const head = document.createElement('div');
-    head.className = 'auto-section-title';
-    head.textContent = `${section.title} · ${section.items.length}`;
-    autoQueueEl.appendChild(head);
-    for (const item of section.items) {
-      autoQueueEl.appendChild(section.render(item));
-    }
-  }
-  if (!nonEmpty) {
+  // If the panel is fully empty AND auto-mode is off, show the legacy hint
+  // instead of three empty sections — less visual noise for first-run state.
+  const totalItems = sections.reduce((n, s) => n + s.items.length, 0);
+  if (totalItems === 0 && !(autoUI.config && autoUI.config.enabled)) {
     const empty = document.createElement('div');
     empty.className = 'auto-empty';
-    empty.textContent = autoUI.config && autoUI.config.enabled
-      ? 'Queue is clear. Polling…'
-      : 'Auto-mode is off. Toggle on to start polling.';
+    empty.textContent = 'Auto-mode is off. Toggle on to start polling.';
     autoQueueEl.appendChild(empty);
+    return;
+  }
+  for (const section of sections) {
+    autoQueueEl.appendChild(renderAutoSection(section));
   }
 }
 
@@ -229,49 +264,51 @@ function renderReviewRow(pr) {
 function renderAutoDrafts() {
   if (!autoDraftsListEl) return;
   autoDraftsListEl.innerHTML = '';
-  if (!autoUI.drafts.length) {
-    const empty = document.createElement('div');
-    empty.className = 'auto-empty';
-    empty.textContent = 'No drafts.';
-    autoDraftsListEl.appendChild(empty);
-    return;
-  }
-  for (const d of autoUI.drafts) {
-    const row = document.createElement('div');
-    row.className = 'auto-draft';
-    const body = (d.data && d.data.body) || '';
-    row.innerHTML = `
-      <div class="auto-draft-head">
-        <span class="auto-draft-kind">${escapeHtml(d.kind)}</span>
-        <span class="auto-draft-target">${escapeHtml(d.repo)} · ${escapeHtml(d.targetId)}</span>
-      </div>
-      <textarea class="auto-draft-body" rows="4">${escapeHtml(body)}</textarea>
-      <div class="auto-draft-actions">
-        <button class="auto-btn primary" data-action="send">Send</button>
-        <button class="auto-btn" data-action="save">Save edits</button>
-        <button class="auto-btn danger" data-action="delete">Delete</button>
-      </div>
-    `;
-    const ta = row.querySelector('textarea');
-    row.querySelector('[data-action="send"]').addEventListener('click', async () => {
-      const res = await window.auto.sendDraft(d.id);
-      if (res && res.ok) {
-        refreshAutoPanel();
-      } else {
-        alert(`Send failed: ${res && res.error || 'unknown'}`);
-      }
-    });
-    row.querySelector('[data-action="save"]').addEventListener('click', async () => {
-      const next = { ...(d.data || {}), body: ta.value };
-      await window.auto.saveDraft(d.kind, d.repo, d.targetId, next);
+  // Render drafts inside a collapsible section just like the queue ones.
+  autoDraftsListEl.appendChild(renderAutoSection({
+    key: 'drafts',
+    title: 'Drafts',
+    items: autoUI.drafts || [],
+    renderItem: renderDraftRow,
+    emptyText: 'No drafts.',
+  }));
+}
+
+function renderDraftRow(d) {
+  const row = document.createElement('div');
+  row.className = 'auto-draft';
+  const body = (d.data && d.data.body) || '';
+  row.innerHTML = `
+    <div class="auto-draft-head">
+      <span class="auto-draft-kind">${escapeHtml(d.kind)}</span>
+      <span class="auto-draft-target">${escapeHtml(d.repo)} · ${escapeHtml(d.targetId)}</span>
+    </div>
+    <textarea class="auto-draft-body" rows="4">${escapeHtml(body)}</textarea>
+    <div class="auto-draft-actions">
+      <button class="auto-btn primary" data-action="send">Send</button>
+      <button class="auto-btn" data-action="save">Save edits</button>
+      <button class="auto-btn danger" data-action="delete">Delete</button>
+    </div>
+  `;
+  const ta = row.querySelector('textarea');
+  row.querySelector('[data-action="send"]').addEventListener('click', async () => {
+    const res = await window.auto.sendDraft(d.id);
+    if (res && res.ok) {
       refreshAutoPanel();
-    });
-    row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
-      await window.auto.deleteDraft(d.id);
-      refreshAutoPanel();
-    });
-    autoDraftsListEl.appendChild(row);
-  }
+    } else {
+      alert(`Send failed: ${res && res.error || 'unknown'}`);
+    }
+  });
+  row.querySelector('[data-action="save"]').addEventListener('click', async () => {
+    const next = { ...(d.data || {}), body: ta.value };
+    await window.auto.saveDraft(d.kind, d.repo, d.targetId, next);
+    refreshAutoPanel();
+  });
+  row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+    await window.auto.deleteDraft(d.id);
+    refreshAutoPanel();
+  });
+  return row;
 }
 
 // ----- Workflows ----------------------------------------------------------
